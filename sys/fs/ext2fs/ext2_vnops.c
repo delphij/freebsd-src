@@ -1697,7 +1697,15 @@ ext2_read(struct vop_read_args *ap)
 	}
 
 	if ((error == 0 || uio->uio_resid != orig_resid) &&
-	    (vp->v_mount->mnt_flag & MNT_NOATIME) == 0)
+	    (vp->v_mount->mnt_flag & MNT_NOATIME) == 0 &&
+	    (ip->i_flag & IN_ACCESS) == 0 &&
+	    ((vp->v_mount->mnt_flag & MNT_RELATIME) == 0 ||
+	    (ip->i_mtime == ip->i_atime ?
+	     ip->i_mtimensec >= ip->i_atimensec :
+	     ip->i_mtime >= ip->i_atime) ||
+	    (ip->i_ctime == ip->i_atime ?
+	     ip->i_ctimensec >= ip->i_atimensec :
+	     ip->i_ctime >= ip->i_atime)))
 		ip->i_flag |= IN_ACCESS;
 	return (error);
 }

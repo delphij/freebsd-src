@@ -3004,6 +3004,7 @@ DB_SHOW_COMMAND(mount, db_show_mount)
 	MNT_FLAG(MNT_GJOURNAL);
 	MNT_FLAG(MNT_MULTILABEL);
 	MNT_FLAG(MNT_ACLS);
+	MNT_FLAG(MNT_RELATIME);
 	MNT_FLAG(MNT_NOATIME);
 	MNT_FLAG(MNT_NOCLUSTERR);
 	MNT_FLAG(MNT_NOCLUSTERW);
@@ -4526,11 +4527,33 @@ void
 vfs_mark_atime(struct vnode *vp, struct ucred *cred)
 {
 	struct mount *mp;
+	struct vattr vattr;
 
 	mp = vp->v_mount;
 	ASSERT_VOP_LOCKED(vp, "vfs_mark_atime");
-	if (mp != NULL && (mp->mnt_flag & (MNT_NOATIME | MNT_RDONLY)) == 0)
-		(void)VOP_MARKATIME(vp);
+
+	/*
+	 * Do nothing if the file system is mounted with noatime or
+	 * marked as read only.
+	 */
+	if (mp == NULL || (mp->mnt_flag & (MNT_NOATIME | MNT_RDONLY)) != 0)
+		return;
+
+	/*
+	 * Relative atime: do nothing if both ctime and mtime are
+	 * smaller than atime.
+	 */
+	if ((mp->mnt_flag & MNT_RELATIME) == MNT_RELATIME) {
+		if (VOP_GETATTR(vp, &vattr, cred) != 0)
+			return;
+		else {
+			if (timespeccmp(&vattr.va_mtime, &vattr.va_atime, < ) &&
+			    timespeccmp(&vattr.va_ctime, &vattr.va_atime, < ))
+				return;
+		}
+	}
+
+	(void)VOP_MARKATIME(vp);
 }
 
 /*

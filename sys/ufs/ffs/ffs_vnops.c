@@ -621,7 +621,14 @@ ffs_read(ap)
 
 	if ((error == 0 || uio->uio_resid != orig_resid) &&
 	    (vp->v_mount->mnt_flag & MNT_NOATIME) == 0 &&
-	    (ip->i_flag & IN_ACCESS) == 0) {
+	    (ip->i_flag & IN_ACCESS) == 0 &&
+	    ((vp->v_mount->mnt_flag & MNT_RELATIME) == 0 ||
+	    (DIP(ip, i_mtime) == DIP(ip, i_atime) ?
+	    (DIP(ip, i_mtimensec) >= DIP(ip, i_atimensec)) :
+	    (DIP(ip, i_mtime) >= DIP(ip, i_atime))) ||
+	    (DIP(ip, i_ctime) == DIP(ip, i_atime) ?
+	    (DIP(ip, i_ctimensec) >= DIP(ip, i_atimensec)) :
+	    (DIP(ip, i_ctime) >= DIP(ip, i_atime))))) {
 		VI_LOCK(vp);
 		ip->i_flag |= IN_ACCESS;
 		VI_UNLOCK(vp);

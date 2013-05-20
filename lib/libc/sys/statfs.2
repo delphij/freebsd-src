@@ -142,6 +142,9 @@ Identifies the root file system.
 The file system is exported read-only.
 .It Dv MNT_NOATIME
 Updating of file access times is disabled.
+.It Dv MNT_RELATIME
+Updating of file access times is only done when it is smaller than both creation
+and modification times.
 .It Dv MNT_USER
 The file system has been mounted by a user.
 .\".It Dv MNT_IGNORE

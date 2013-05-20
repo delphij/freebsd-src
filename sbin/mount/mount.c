@@ -97,6 +97,7 @@ static struct opt {
 	{ MNT_ASYNC,		"asynchronous" },
 	{ MNT_EXPORTED,		"NFS exported" },
 	{ MNT_LOCAL,		"local" },
+	{ MNT_RELATIME,		"relative atime" },
 	{ MNT_NOATIME,		"noatime" },
 	{ MNT_NOEXEC,		"noexec" },
 	{ MNT_NOSUID,		"nosuid" },

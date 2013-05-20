@@ -99,6 +99,7 @@ static const char *global_opts[] = {
 	"rw",
 	"nosuid",
 	"noexec",
+	"relatime",
 	NULL
 };
 
@@ -602,6 +603,14 @@ vfs_donmount(struct thread *td, uint64_t fsflags, struct uio *fsoptions)
 			free(opt->name, M_MOUNT);
 			opt->name = strdup("nonoatime", M_MOUNT);
 		}
+		else if (strcmp(opt->name, "norelatime") == 0) {
+			vfs_freeopt(optlist, opt);
+			fsflags &= ~MNT_RELATIME;
+		}
+		else if (strcmp(opt->name, "relatime") == 0) {
+			vfs_freeopt(optlist, opt);
+			fsflags |= MNT_RELATIME;
+		}
 		else if (strcmp(opt->name, "noclusterr") == 0)
 			fsflags |= MNT_NOCLUSTERR;
 		else if (strcmp(opt->name, "clusterr") == 0) {
@@ -811,7 +820,7 @@ vfs_domount_first(
 	/* XXXMAC: pass to vfs_mount_alloc? */
 	mp->mnt_optnew = *optlist;
 	/* Set the mount level flags. */
-	mp->mnt_flag = (fsflags & (MNT_UPDATEMASK | MNT_ROOTFS | MNT_RDONLY));
+	mp->mnt_flag = (fsflags & (MNT_UPDATEMASK | MNT_ROOTFS | MNT_RDONLY | MNT_RELATIME));
 
 	/*
 	 * Mount the filesystem.
@@ -933,7 +942,8 @@ vfs_domount_update(
 	MNT_ILOCK(mp);
 	mp->mnt_flag &= ~MNT_UPDATEMASK;
 	mp->mnt_flag |= fsflags & (MNT_RELOAD | MNT_FORCE | MNT_UPDATE |
-	    MNT_SNAPSHOT | MNT_ROOTFS | MNT_UPDATEMASK | MNT_RDONLY);
+	    MNT_SNAPSHOT | MNT_ROOTFS | MNT_UPDATEMASK | MNT_RDONLY |
+	    MNT_RELATIME);
 	if ((mp->mnt_flag & MNT_ASYNC) == 0)
 		mp->mnt_kern_flag &= ~MNTK_ASYNC;
 	MNT_IUNLOCK(mp);
