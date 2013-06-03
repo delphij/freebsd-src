@@ -1059,6 +1059,7 @@ void
 tws_intr(void *arg)
 {
     struct tws_softc *sc = (struct tws_softc *)arg;
+    uint8_t state;
     u_int32_t histat=0, db=0;
 
     if (!(sc)) {
@@ -1066,13 +1067,12 @@ tws_intr(void *arg)
         return;
     }
 
-    if ( tws_get_state(sc) == TWS_RESET ) {
-        return;
-    }
+    mtx_lock(&sc->gen_lock);
+    state = tws_get_state(sc);
+    mtx_unlock(&sc->gen_lock);
 
-    if ( tws_get_state(sc) != TWS_ONLINE ) {
-        return;
-    }
+    if (state != TWS_ONLINE)
+	return;
 
     sc->stats.num_intrs++;
     histat = tws_read_reg(sc, TWS_I2O0_HISTAT, 4);
@@ -1149,29 +1149,26 @@ tws_poll(struct cam_sim *sim)
 void
 tws_timeout(void *arg)
 {
+    uint8_t state;
     struct tws_request *req = (struct tws_request *)arg;
     struct tws_softc *sc = req->sc;
 
-
-    if ( req->error_code == TWS_REQ_RET_RESET ) {
+    if (req->error_code == TWS_REQ_RET_RESET)
         return;
-    }
 
     mtx_lock(&sc->gen_lock);
-    if ( req->error_code == TWS_REQ_RET_RESET ) {
-        mtx_unlock(&sc->gen_lock);
-        return;
-    }
+    state = tws_get_state(sc);
+    mtx_unlock(&sc->gen_lock);
 
-    if ( tws_get_state(sc) == TWS_RESET ) {
-        mtx_unlock(&sc->gen_lock);
+    if (state == TWS_RESET)
         return;
-    }
 
     tws_teardown_intr(sc);
     xpt_freeze_simq(sc->sim, 1);
 
+    mtx_lock(&sc->gen_lock);
     tws_send_event(sc, TWS_RESET_START);
+    mtx_unlock(&sc->gen_lock);
 
     if (req->type == TWS_REQ_TYPE_SCSI_IO) {
         device_printf(sc->tws_dev, "I/O Request timed out... Resetting controller\n");
@@ -1187,6 +1184,7 @@ tws_timeout(void *arg)
     tws_reinit( (void*) sc );
 
 //  device_printf(sc->tws_dev,  "Controller Reset complete!\n");
+    mtx_lock(&sc->gen_lock);
     tws_send_event(sc, TWS_RESET_COMPLETE);
     mtx_unlock(&sc->gen_lock);
 
@@ -1197,18 +1195,22 @@ tws_timeout(void *arg)
 void
 tws_reset(void *arg)
 {
+    uint8_t state;
     struct tws_softc *sc = (struct tws_softc *)arg;
 
     mtx_lock(&sc->gen_lock);
-    if ( tws_get_state(sc) == TWS_RESET ) {
-        mtx_unlock(&sc->gen_lock);
+    state = tws_get_state(sc);
+    mtx_unlock(&sc->gen_lock);
+
+    if (state == TWS_RESET)
         return;
-    }
 
     tws_teardown_intr(sc);
     xpt_freeze_simq(sc->sim, 1);
 
+    mtx_lock(&sc->gen_lock);
     tws_send_event(sc, TWS_RESET_START);
+    mtx_unlock(&sc->gen_lock);
 
     device_printf(sc->tws_dev,  "Resetting controller\n");
 
@@ -1218,6 +1220,7 @@ tws_reset(void *arg)
     tws_reinit( (void*) sc );
 
 //  device_printf(sc->tws_dev,  "Controller Reset complete!\n");
+    mtx_lock(&sc->gen_lock);
     tws_send_event(sc, TWS_RESET_COMPLETE);
     mtx_unlock(&sc->gen_lock);
 
@@ -1228,14 +1231,18 @@ tws_reset(void *arg)
 static void
 tws_reset_cb(void *arg)
 {
+    uint8_t state;
     struct tws_softc *sc = (struct tws_softc *)arg;
     time_t endt;
     int found = 0;
     u_int32_t reg;
   
-    if ( tws_get_state(sc) != TWS_RESET ) {
+    mtx_lock(&sc->gen_lock);
+    state = tws_get_state(sc);
+    mtx_unlock(&sc->gen_lock);
+
+    if (state != TWS_RESET)
         return;
-    }
 
 //  device_printf(sc->tws_dev,  "Draining Busy Queue\n");
     tws_drain_busy_queue(sc);
