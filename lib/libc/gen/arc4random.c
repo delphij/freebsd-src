@@ -1,8 +1,9 @@
-/*	$OpenBSD: arc4random.c,v 1.22 2010/12/22 08:23:42 otto Exp $	*/
+/*	$OpenBSD: arc4random.c,v 1.26 2013/10/21 20:33:23 deraadt Exp $	*/
 
 /*
  * Copyright (c) 1996, David Mazieres <dm@uun.org>
  * Copyright (c) 2008, Damien Miller <djm@openbsd.org>
+ * Copyright (c) 2013, Markus Friedl <markus@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -18,15 +19,7 @@
  */
 
 /*
- * Arc4 random number generator for OpenBSD.
- *
- * This code is derived from section 17.1 of Applied Cryptography,
- * second edition, which describes a stream cipher allegedly
- * compatible with RSA Labs "RC4" cipher (the actual description of
- * which is a trade secret).  The same algorithm is used as a stream
- * cipher called "arcfour" in Tatu Ylonen's ssh package.
- *
- * RC4 is a registered trademark of RSA Laboratories.
+ * ChaCha based random number generator for OpenBSD.
  */
 
 #include <sys/cdefs.h>
@@ -36,15 +29,19 @@ __FBSDID("$FreeBSD$");
 #include <fcntl.h>
 #include <limits.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/param.h>
-#include <sys/sysctl.h>
 #include <sys/time.h>
+#include <sys/sysctl.h>
 #include <pthread.h>
 
 #include "libc_private.h"
 #include "un-namespace.h"
+
+#define KEYSTREAM_ONLY
+#include "chacha_private.h"
 
 #ifdef __GNUC__
 #define inline __inline
@@ -52,16 +49,14 @@ __FBSDID("$FreeBSD$");
 #define inline
 #endif				/* !__GNUC__ */
 
-struct arc4_stream {
-	u_int8_t i;
-	u_int8_t j;
-	u_int8_t s[256];
-};
-
-static pthread_mutex_t	arc4random_mtx = PTHREAD_MUTEX_INITIALIZER;
+#define KEYSZ	32
+#define IVSZ	8
+#define BLOCKSZ	64
+#define RSBUFSZ	(16*BLOCKSZ)
 
 #define	RANDOMDEV	"/dev/random"
-#define	KEYSIZE		128
+static pthread_mutex_t	arc4random_mtx = PTHREAD_MUTEX_INITIALIZER;
+
 #define	_ARC4_LOCK()						\
 	do {							\
 		if (__isthreaded)				\
@@ -75,53 +70,34 @@ static pthread_mutex_t	arc4random_mtx = PTHREAD_MUTEX_INITIALIZER;
 	} while (0)
 
 static int rs_initialized;
-static struct arc4_stream rs;
-static pid_t arc4_stir_pid;
-static int arc4_count;
+static pid_t rs_stir_pid;
+static chacha_ctx rs;		/* chacha context for random keystream */
+static u_char rs_buf[RSBUFSZ];	/* keystream blocks */
+static size_t rs_have;		/* valid bytes at end of rs_buf */
+static size_t rs_count;		/* bytes till reseed */
 
 extern int __sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
     void *newp, size_t newlen);
 
-static inline u_int8_t arc4_getbyte(void);
-static void arc4_stir(void);
+static inline void _rs_rekey(u_char *dat, size_t datlen);
 
 static inline void
-arc4_init(void)
+_rs_init(u_char *buf, size_t n)
 {
-	int     n;
-
-	for (n = 0; n < 256; n++)
-		rs.s[n] = n;
-	rs.i = 0;
-	rs.j = 0;
-}
-
-static inline void
-arc4_addrandom(u_char *dat, int datlen)
-{
-	int     n;
-	u_int8_t si;
-
-	rs.i--;
-	for (n = 0; n < 256; n++) {
-		rs.i = (rs.i + 1);
-		si = rs.s[rs.i];
-		rs.j = (rs.j + si + dat[n % datlen]);
-		rs.s[rs.i] = rs.s[rs.j];
-		rs.s[rs.j] = si;
-	}
-	rs.j = rs.i;
+	if (n < KEYSZ + IVSZ)
+		return;
+	chacha_keysetup(&rs, buf, KEYSZ * 8, 0);
+	chacha_ivsetup(&rs, buf + KEYSZ);
 }
 
 static size_t
-arc4_sysctl(u_char *buf, size_t size)
+_rs_sysctl(u_char *buf, size_t size)
 {
 	int mib[2];
-	size_t len, done;
+	size_t len, done = 0;
 
 	mib[0] = CTL_KERN;
 	mib[1] = KERN_ARND;
-	done = 0;
 
 	do {
 		len = size;
@@ -136,125 +112,132 @@ arc4_sysctl(u_char *buf, size_t size)
 }
 
 static void
-arc4_stir(void)
+_rs_stir(void)
 {
-	int done, fd, i;
-	struct {
-		struct timeval	tv;
-		pid_t		pid;
-		u_char	 	rnd[KEYSIZE];
+	int done, fd;
+	union {
+		u_char	_rnd[KEYSZ + IVSZ];
+		struct {
+			struct timeval	tv;
+			pid_t		pid;
+		} _pi;
 	} rdat;
+#define	rnd	(rdat._rnd)
 
-	if (!rs_initialized) {
-		arc4_init();
-		rs_initialized = 1;
-	}
 	done = 0;
-	if (arc4_sysctl((u_char *)&rdat, KEYSIZE) == KEYSIZE)
+	if (_rs_sysctl((u_char *)&rnd, sizeof(rnd)) == sizeof(rnd))
 		done = 1;
 	if (!done) {
 		fd = _open(RANDOMDEV, O_RDONLY | O_CLOEXEC, 0);
 		if (fd >= 0) {
-			if (_read(fd, &rdat, KEYSIZE) == KEYSIZE)
+			if (_read(fd, &rnd, sizeof(rnd)) == sizeof(rnd))
 				done = 1;
 			(void)_close(fd);
 		}
 	}
 	if (!done) {
-		(void)gettimeofday(&rdat.tv, NULL);
-		rdat.pid = getpid();
+		(void)gettimeofday(&rdat._pi.tv, NULL);
+		rdat._pi.pid = getpid();
 		/* We'll just take whatever was on the stack too... */
 	}
 
-	arc4_addrandom((u_char *)&rdat, KEYSIZE);
+	if (!rs_initialized) {
+		rs_initialized = 1;
+		_rs_init(rnd, sizeof(rnd));
+	} else
+		_rs_rekey(rnd, sizeof(rnd));
+	memset(rnd, 0, sizeof(rnd));
 
-	/*
-	 * Discard early keystream, as per recommendations in:
-	 * "(Not So) Random Shuffles of RC4" by Ilya Mironov.
-	 */
-	for (i = 0; i < 1024; i++)
-		(void)arc4_getbyte();
-	arc4_count = 1600000;
+	/* invalidate rs_buf */
+	rs_have = 0;
+	memset(rs_buf, 0, RSBUFSZ);
+
+	rs_count = 1600000;
 }
 
-static void
-arc4_stir_if_needed(void)
+static inline void
+_rs_stir_if_needed(size_t len)
 {
 	pid_t pid = getpid();
 
-	if (arc4_count <= 0 || !rs_initialized || arc4_stir_pid != pid)
-	{
-		arc4_stir_pid = pid;
-		arc4_stir();
+	if (rs_count <= len || !rs_initialized || rs_stir_pid != pid) {
+		rs_stir_pid = pid;
+		_rs_stir();
+	} else
+		rs_count -= len;
+}
+
+static inline void
+_rs_rekey(u_char *dat, size_t datlen)
+{
+#ifndef KEYSTREAM_ONLY
+	memset(rs_buf, 0,RSBUFSZ);
+#endif
+	/* fill rs_buf with the keystream */
+	chacha_encrypt_bytes(&rs, rs_buf, rs_buf, RSBUFSZ);
+	/* mix in optional user provided data */
+	if (dat) {
+		size_t i, m;
+
+		m = MIN(datlen, KEYSZ + IVSZ);
+		for (i = 0; i < m; i++)
+			rs_buf[i] ^= dat[i];
+	}
+	/* immediately reinit for backtracking resistance */
+	_rs_init(rs_buf, KEYSZ + IVSZ);
+	memset(rs_buf, 0, KEYSZ + IVSZ);
+	rs_have = RSBUFSZ - KEYSZ - IVSZ;
+}
+
+static inline void
+_rs_random_buf(void *_buf, size_t n)
+{
+	u_char *buf = (u_char *)_buf;
+	size_t m;
+
+	_rs_stir_if_needed(n);
+	while (n > 0) {
+		if (rs_have > 0) {
+			m = MIN(n, rs_have);
+			memcpy(buf, rs_buf + RSBUFSZ - rs_have, m);
+			memset(rs_buf + RSBUFSZ - rs_have, 0, m);
+			buf += m;
+			n -= m;
+			rs_have -= m;
+		}
+		if (rs_have == 0)
+			_rs_rekey(NULL, 0);
 	}
 }
 
-static inline u_int8_t
-arc4_getbyte(void)
+static inline void
+_rs_random_u32(u_int32_t *val)
 {
-	u_int8_t si, sj;
-
-	rs.i = (rs.i + 1);
-	si = rs.s[rs.i];
-	rs.j = (rs.j + si);
-	sj = rs.s[rs.j];
-	rs.s[rs.i] = sj;
-	rs.s[rs.j] = si;
-	return (rs.s[(si + sj) & 0xff]);
-}
-
-static inline u_int32_t
-arc4_getword(void)
-{
-	u_int32_t val;
-	val = arc4_getbyte() << 24;
-	val |= arc4_getbyte() << 16;
-	val |= arc4_getbyte() << 8;
-	val |= arc4_getbyte();
-	return val;
-}
-
-void
-arc4random_stir(void)
-{
-	_ARC4_LOCK();
-	arc4_stir();
-	_ARC4_UNLOCK();
-}
-
-void
-arc4random_addrandom(u_char *dat, int datlen)
-{
-	_ARC4_LOCK();
-	if (!rs_initialized)
-		arc4_stir();
-	arc4_addrandom(dat, datlen);
-	_ARC4_UNLOCK();
+	_rs_stir_if_needed(sizeof(*val));
+	if (rs_have < sizeof(*val))
+		_rs_rekey(NULL, 0);
+	memcpy(val, rs_buf + RSBUFSZ - rs_have, sizeof(*val));
+	memset(rs_buf + RSBUFSZ - rs_have, 0, sizeof(*val));
+	rs_have -= sizeof(*val);
+	return;
 }
 
 u_int32_t
 arc4random(void)
 {
 	u_int32_t val;
+
 	_ARC4_LOCK();
-	arc4_count -= 4;
-	arc4_stir_if_needed();
-	val = arc4_getword();
+	_rs_random_u32(&val);
 	_ARC4_UNLOCK();
 	return val;
 }
 
 void
-arc4random_buf(void *_buf, size_t n)
+arc4random_buf(void *buf, size_t n)
 {
-	u_char *buf = (u_char *)_buf;
 	_ARC4_LOCK();
-	arc4_stir_if_needed();
-	while (n--) {
-		if (--arc4_count <= 0)
-			arc4_stir();
-		buf[n] = arc4_getbyte();
-	}
+	_rs_random_buf(buf, n);
 	_ARC4_UNLOCK();
 }
 
@@ -276,17 +259,8 @@ arc4random_uniform(u_int32_t upper_bound)
 	if (upper_bound < 2)
 		return 0;
 
-#if (ULONG_MAX > 0xffffffffUL)
-	min = 0x100000000UL % upper_bound;
-#else
-	/* Calculate (2**32 % upper_bound) avoiding 64-bit math */
-	if (upper_bound > 0x80000000)
-		min = 1 + ~upper_bound;		/* 2**32 - upper_bound */
-	else {
-		/* (2**32 - (x * 2)) % x == 2**32 % x when x <= 2**31 */
-		min = ((0xffffffff - (upper_bound * 2)) + 1) % upper_bound;
-	}
-#endif
+	/* 2**32 % x == (2**32 - x) % x */
+	min = -upper_bound % upper_bound;
 
 	/*
 	 * This could theoretically loop forever but each retry has
@@ -321,5 +295,6 @@ main(int argc, char **argv)
 	v /= iter;
 
 	printf("%qd cycles\n", v);
+	exit(0);
 }
 #endif
