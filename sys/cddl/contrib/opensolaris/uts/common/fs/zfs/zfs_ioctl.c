@@ -2489,16 +2489,21 @@ zfs_prop_set_special(const char *dsname, zprop_source_t source,
 	}
 	case ZFS_PROP_COMPRESSION:
 	{
-		if (intval == ZIO_COMPRESS_LZ4) {
-			spa_t *spa;
+		spa_t *spa;
 
-			if ((err = spa_open(dsname, &spa, FTAG)) != 0)
-				return (err);
+		if ((err = spa_open(dsname, &spa, FTAG)) != 0)
+			return (err);
 
-			/*
-			 * Setting the LZ4 compression algorithm activates
-			 * the feature.
-			 */
+		/*
+		 * Setting the LZ4 compression algorithm activates
+		 * the feature.
+		 *
+		 * When LZ4 compression algorithm is enabled, enabling
+		 * compression is equavilent to using LZ4.
+		 */
+		if ((intval == ZIO_COMPRESS_LZ4) ||
+		    (intval == ZIO_COMPRESS_ON && spa_feature_is_enabled(spa,
+			SPA_FEATURE_LZ4_COMPRESS)) ) {
 			if (!spa_feature_is_active(spa,
 			    SPA_FEATURE_LZ4_COMPRESS)) {
 				if ((err = zfs_prop_activate_feature(spa,

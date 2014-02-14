@@ -1657,7 +1657,8 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 		 * that specializes in arrays of bps.
 		 */
 		compress = zfs_mdcomp_disable ? ZIO_COMPRESS_EMPTY :
-		    ZIO_COMPRESS_LZJB;
+		    zio_compress_select(dmu_objset_spa(os),
+			ZIO_COMPRESS_ON, ZIO_COMPRESS_ON_VALUE);
 
 		/*
 		 * Metadata always gets checksummed.  If the data
@@ -1682,7 +1683,8 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 		compress = ZIO_COMPRESS_OFF;
 		checksum = ZIO_CHECKSUM_NOPARITY;
 	} else {
-		compress = zio_compress_select(dn->dn_compress, compress);
+		compress = zio_compress_select(dmu_objset_spa(os),
+		    dn->dn_compress, compress);
 
 		checksum = (dedup_checksum == ZIO_CHECKSUM_OFF) ?
 		    zio_checksum_select(dn->dn_checksum, checksum) :

@@ -168,7 +168,7 @@ zpool_feature_init(void)
 	zfeature_register(SPA_FEATURE_LZ4_COMPRESS,
 	    "org.illumos:lz4_compress", "lz4_compress",
 	    "LZ4 compression algorithm support.", B_FALSE, B_FALSE,
-	    B_FALSE, NULL);
+	    B_TRUE, NULL);
 
 	zfeature_register(SPA_FEATURE_MULTI_VDEV_CRASH_DUMP,
 	    "com.joyent:multi_vdev_crash_dump", "multi_vdev_crash_dump",
