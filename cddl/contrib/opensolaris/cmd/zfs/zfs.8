@@ -927,11 +927,15 @@ a recommended practice.
 Controls the compression algorithm used for this dataset. The
 .Cm lzjb
 compression algorithm is optimized for performance while providing decent data
-compression. Setting compression to
+compression.
+Setting compression to
 .Cm on
 uses the
+.Cm lz4
+compression algorithm when it is activated, or
 .Cm lzjb
-compression algorithm. The
+compression algorithm as fallback.
+The
 .Cm gzip
 compression algorithm uses the same compression as the
 .Xr gzip 1
