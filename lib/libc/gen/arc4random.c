@@ -35,6 +35,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/time.h>
+#include <sys/queue.h>
 #include <sys/sysctl.h>
 #include <pthread.h>
 
@@ -56,20 +57,14 @@ __FBSDID("$FreeBSD$");
 #define RSBUFSZ	(16*BLOCKSZ)
 
 #define	RANDOMDEV	"/dev/random"
-static pthread_mutex_t	arc4random_mtx = PTHREAD_MUTEX_INITIALIZER;
 
-#define	_ARC4_LOCK()						\
-	do {							\
-		if (__isthreaded)				\
-			_pthread_mutex_lock(&arc4random_mtx);	\
-	} while (0)
+/* rsq_mtx protects all rs_* and rs0 */
+static pthread_mutex_t	rsq_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t	rsq_cv = PTHREAD_COND_INITIALIZER;
 
-#define	_ARC4_UNLOCK()						\
-	do {							\
-		if (__isthreaded)				\
-			_pthread_mutex_unlock(&arc4random_mtx);	\
-	} while (0)
-
+static int rsq_ncpu = -1;
+static int rsq_count = 0;	/* Total random_state_t of existence */
+static TAILQ_HEAD(random_state_head, random_state) rsq_head;
 typedef struct random_state {
 	int		_rs_initialized;
 	pid_t		_rs_stir_pid;
@@ -77,8 +72,8 @@ typedef struct random_state {
 	u_char		_rs_buf[RSBUFSZ];	/* keystream blocks */
 	size_t		_rs_have;		/* valid bytes at end of rs_buf */
 	size_t		_rs_count;		/* bytes till reseed */
+	TAILQ_ENTRY(random_state) entries;
 } random_state_t;
-
 static random_state_t rs0;
 
 #define rs_initialized (rsp->_rs_initialized)
@@ -90,6 +85,78 @@ static random_state_t rs0;
 
 extern int __sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
     void *newp, size_t newlen);
+
+/*
+ * Look up for an usable random state
+ */
+static inline random_state_t *
+_rs_get_state(void)
+{
+	random_state_t *qe;
+
+	if (__isthreaded)
+		_pthread_mutex_lock(&rsq_mtx);
+	while ((qe = TAILQ_FIRST(&rsq_head)) == NULL) {
+		if (rsq_ncpu == -1) {
+			size_t size = sizeof(rsq_ncpu);
+
+			if (sysctlbyname("hw.ncpu", &rsq_ncpu, &size, NULL, 0) < 0 ||
+				size != sizeof(rsq_ncpu))
+				rsq_ncpu = 1;
+			/*
+			 * We are here for the first time.  Use the statically
+			 * allocated state so that we have at least one.
+			 *
+			 * assert(rsq_count == 0);
+			 */
+			qe = &rs0;
+		} else if (rsq_count < rsq_ncpu)
+			qe = calloc(1, sizeof(*qe));
+
+		if (qe != NULL) {
+			rsq_count++;
+			break;
+		} else {
+			/*
+			 * We do not have any available state at this
+			 * time.  Sleep and wait for a wakeup.
+			 *
+			 * assert(__isthreaded);
+			 */
+			_pthread_cond_wait(&rsq_cv, &rsq_mtx);
+		}
+	}
+
+	/*
+	 * assert(qe != NULL);
+	 *
+	 * qe is either first element of rsq, or newly allocated.
+	 * Remove it from the head if it's the first case.
+	 */
+	if (qe == TAILQ_FIRST(&rsq_head))
+		TAILQ_REMOVE(&rsq_head, qe, entries);
+	if (__isthreaded)
+		_pthread_mutex_unlock(&rsq_mtx);
+
+	return (qe);
+}
+
+/*
+ * Put random state back to available random state queue and wake up potential
+ * waiter.
+ */
+static inline void
+_rs_put_state(random_state_t *rsp)
+{
+
+	if (__isthreaded)
+		_pthread_mutex_lock(&rsq_mtx);
+	TAILQ_INSERT_TAIL(&rsq_head, rsp, entries);
+	if (__isthreaded) {
+		_pthread_cond_signal(&rsq_cv);
+		_pthread_mutex_unlock(&rsq_mtx);
+	}
+}
 
 static inline void _rs_rekey(random_state_t *rsp, u_char *dat, size_t datlen);
 
@@ -238,22 +305,22 @@ u_int32_t
 arc4random(void)
 {
 	u_int32_t val;
-	random_state_t *rsp = &rs0;
+	random_state_t *rsp;
 
-	_ARC4_LOCK();
+	rsp = _rs_get_state();
 	_rs_random_u32(rsp, &val);
-	_ARC4_UNLOCK();
+	_rs_put_state(rsp);
 	return val;
 }
 
 void
 arc4random_buf(void *buf, size_t n)
 {
-	random_state_t *rsp = &rs0;
+	random_state_t *rsp;
 
-	_ARC4_LOCK();
+	rsp = _rs_get_state();
 	_rs_random_buf(rsp, buf, n);
-	_ARC4_UNLOCK();
+	_rs_put_state(rsp);
 }
 
 /*
