@@ -4,6 +4,7 @@
  * Copyright (c) 1996, David Mazieres <dm@uun.org>
  * Copyright (c) 2008, Damien Miller <djm@openbsd.org>
  * Copyright (c) 2013, Markus Friedl <markus@openbsd.org>
+ * Copyright (c) 2014, Xin Li <delphij@FreeBSD.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -69,20 +70,31 @@ static pthread_mutex_t	arc4random_mtx = PTHREAD_MUTEX_INITIALIZER;
 			_pthread_mutex_unlock(&arc4random_mtx);	\
 	} while (0)
 
-static int rs_initialized;
-static pid_t rs_stir_pid;
-static chacha_ctx rs;		/* chacha context for random keystream */
-static u_char rs_buf[RSBUFSZ];	/* keystream blocks */
-static size_t rs_have;		/* valid bytes at end of rs_buf */
-static size_t rs_count;		/* bytes till reseed */
+typedef struct random_state {
+	int		_rs_initialized;
+	pid_t		_rs_stir_pid;
+	chacha_ctx	_rs;		/* chacha context for random keystream */
+	u_char		_rs_buf[RSBUFSZ];	/* keystream blocks */
+	size_t		_rs_have;		/* valid bytes at end of rs_buf */
+	size_t		_rs_count;		/* bytes till reseed */
+} random_state_t;
+
+static random_state_t rs0;
+
+#define rs_initialized (rsp->_rs_initialized)
+#define rs_stir_pid (rsp->_rs_stir_pid)
+#define rs (rsp->_rs)
+#define rs_buf (rsp->_rs_buf)
+#define rs_have (rsp->_rs_have)
+#define rs_count (rsp->_rs_count)
 
 extern int __sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
     void *newp, size_t newlen);
 
-static inline void _rs_rekey(u_char *dat, size_t datlen);
+static inline void _rs_rekey(random_state_t *rsp, u_char *dat, size_t datlen);
 
 static inline void
-_rs_init(u_char *buf, size_t n)
+_rs_init(random_state_t *rsp, u_char *buf, size_t n)
 {
 	if (n < KEYSZ + IVSZ)
 		return;
@@ -112,7 +124,7 @@ _rs_sysctl(u_char *buf, size_t size)
 }
 
 static void
-_rs_stir(void)
+_rs_stir(random_state_t *rsp)
 {
 	int done, fd;
 	union {
@@ -143,9 +155,9 @@ _rs_stir(void)
 
 	if (!rs_initialized) {
 		rs_initialized = 1;
-		_rs_init(rnd, sizeof(rnd));
+		_rs_init(rsp, rnd, sizeof(rnd));
 	} else
-		_rs_rekey(rnd, sizeof(rnd));
+		_rs_rekey(rsp, rnd, sizeof(rnd));
 	memset(rnd, 0, sizeof(rnd));
 
 	/* invalidate rs_buf */
@@ -156,19 +168,19 @@ _rs_stir(void)
 }
 
 static inline void
-_rs_stir_if_needed(size_t len)
+_rs_stir_if_needed(random_state_t *rsp, size_t len)
 {
 	pid_t pid = getpid();
 
 	if (rs_count <= len || !rs_initialized || rs_stir_pid != pid) {
 		rs_stir_pid = pid;
-		_rs_stir();
+		_rs_stir(rsp);
 	} else
 		rs_count -= len;
 }
 
 static inline void
-_rs_rekey(u_char *dat, size_t datlen)
+_rs_rekey(random_state_t *rsp, u_char *dat, size_t datlen)
 {
 #ifndef KEYSTREAM_ONLY
 	memset(rs_buf, 0,RSBUFSZ);
@@ -184,18 +196,18 @@ _rs_rekey(u_char *dat, size_t datlen)
 			rs_buf[i] ^= dat[i];
 	}
 	/* immediately reinit for backtracking resistance */
-	_rs_init(rs_buf, KEYSZ + IVSZ);
+	_rs_init(rsp, rs_buf, KEYSZ + IVSZ);
 	memset(rs_buf, 0, KEYSZ + IVSZ);
 	rs_have = RSBUFSZ - KEYSZ - IVSZ;
 }
 
 static inline void
-_rs_random_buf(void *_buf, size_t n)
+_rs_random_buf(random_state_t *rsp, void *_buf, size_t n)
 {
 	u_char *buf = (u_char *)_buf;
 	size_t m;
 
-	_rs_stir_if_needed(n);
+	_rs_stir_if_needed(rsp, n);
 	while (n > 0) {
 		if (rs_have > 0) {
 			m = MIN(n, rs_have);
@@ -206,16 +218,16 @@ _rs_random_buf(void *_buf, size_t n)
 			rs_have -= m;
 		}
 		if (rs_have == 0)
-			_rs_rekey(NULL, 0);
+			_rs_rekey(rsp, NULL, 0);
 	}
 }
 
 static inline void
-_rs_random_u32(u_int32_t *val)
+_rs_random_u32(random_state_t *rsp, u_int32_t *val)
 {
-	_rs_stir_if_needed(sizeof(*val));
+	_rs_stir_if_needed(rsp, sizeof(*val));
 	if (rs_have < sizeof(*val))
-		_rs_rekey(NULL, 0);
+		_rs_rekey(rsp, NULL, 0);
 	memcpy(val, rs_buf + RSBUFSZ - rs_have, sizeof(*val));
 	memset(rs_buf + RSBUFSZ - rs_have, 0, sizeof(*val));
 	rs_have -= sizeof(*val);
@@ -226,9 +238,10 @@ u_int32_t
 arc4random(void)
 {
 	u_int32_t val;
+	random_state_t *rsp = &rs0;
 
 	_ARC4_LOCK();
-	_rs_random_u32(&val);
+	_rs_random_u32(rsp, &val);
 	_ARC4_UNLOCK();
 	return val;
 }
@@ -236,8 +249,10 @@ arc4random(void)
 void
 arc4random_buf(void *buf, size_t n)
 {
+	random_state_t *rsp = &rs0;
+
 	_ARC4_LOCK();
-	_rs_random_buf(buf, n);
+	_rs_random_buf(rsp, buf, n);
 	_ARC4_UNLOCK();
 }
 
