@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2013 Xin Li <delphij@FreeBSD.org>
+ * Copyright (c) 2014 Xin Li <delphij@FreeBSD.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -30,6 +30,7 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/types.h>
+#include <stdbool.h>
 #include <syslog.h>
 
 /*
@@ -45,11 +46,15 @@ __FBSDID("$FreeBSD$");
 void __arc4random_stir_fbsd10(void);
 void __arc4random_addrandom_fbsd10(u_char *, int);
 
+static bool warned = false;
+
 void
 __arc4random_stir_fbsd10(void)
 {
 
-	syslog(LOG_NOTICE, "Deprecated function arc4random_stir() called");
+	if (!warned)
+		syslog(LOG_NOTICE, "Deprecated function arc4random_stir() called");
+	warned = true;
 	return;
 }
 
@@ -57,7 +62,9 @@ void
 __arc4random_addrandom_fbsd10(u_char * dummy1 __unused, int dummy2 __unused)
 {
 
-	syslog(LOG_NOTICE, "Deprecated function arc4random_addrandom() called");
+	if (!warned)
+		syslog(LOG_NOTICE, "Deprecated function arc4random_addrandom() called");
+	warned = true;
 	return;
 }
 
