@@ -64,7 +64,7 @@ static pthread_cond_t	rsq_cv = PTHREAD_COND_INITIALIZER;
 
 static int rsq_ncpu = -1;
 static int rsq_count = 0;	/* Total random_state_t of existence */
-static TAILQ_HEAD(random_state_head, random_state) rsq_head;
+static TAILQ_HEAD(random_state_head, random_state) rsq_head = TAILQ_HEAD_INITIALIZER(rsq_head);
 typedef struct random_state {
 	int		_rs_initialized;
 	pid_t		_rs_stir_pid;
