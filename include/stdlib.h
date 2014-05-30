@@ -262,6 +262,12 @@ __uint32_t
 void	 arc4random_buf(void *, size_t);
 __uint32_t 
 	 arc4random_uniform(__uint32_t);
+
+#ifndef NO_OLD_ARC4RANDOM_SHIMS
+#define arc4random_stir()
+#define arc4random_addrandom(a,b)
+#endif
+
 char	*getbsize(int *, long *);
 					/* getcap(3) functions */
 char	*cgetcap(char *, const char *, int);
