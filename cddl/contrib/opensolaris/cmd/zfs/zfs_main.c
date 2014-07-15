@@ -3952,6 +3952,7 @@ zfs_do_receive(int argc, char **argv)
 				err = 1;
 				goto recverror;
 			}
+			break;
 		case 'F':
 			flags.force = B_TRUE;
 			break;
