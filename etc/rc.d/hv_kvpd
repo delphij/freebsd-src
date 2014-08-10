@@ -8,9 +8,8 @@
 . /etc/rc.subr
 
 name="hv_kvp_daemon"
-rcvar=`hv_kvp_daemon`
 command="/usr/sbin/${name}"
-required_dirs="/usr/local/hyperv"
+required_dirs="/var/db/hyperv"
 
 load_rc_config $name
 run_rc_command "$1"
