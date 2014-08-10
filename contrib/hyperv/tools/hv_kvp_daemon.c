@@ -52,7 +52,7 @@
 #include <syslog.h>
 #include <unistd.h>
 
-#include "../../../sys/dev/hyperv/utilities/hv_kvp.h"
+#include "hv_kvp.h"
 
 typedef uint8_t		__u8;
 typedef uint16_t	__u16;
