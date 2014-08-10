@@ -36,6 +36,7 @@
 #include <netdb.h>
 
 #include <netinet/in.h>
+#include <net/ethernet.h>
 #include <net/if_dl.h>
 #include <net/if_types.h>
 
@@ -296,7 +297,7 @@ kvp_file_init(void)
 		fname = kvp_pools[i].fname;
 		records_read = 0;
 		num_blocks = 1;
-		sprintf(fname, "/var/db/hyperv/pool/.kvp_pool_%d", i);
+		snprintf(fname, MAX_FILE_NAME, "/var/db/hyperv/pool/.kvp_pool_%d", i);
 		fd = open(fname, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IROTH);
 
 		if (fd == -1) {
@@ -557,31 +558,6 @@ kvp_get_os_info(void)
 	return;
 }
 
-
-static char *
-get_mac_address(const char *sdlstring)
-{
-	char octet[4];
-	char buf[256] = "\0";
-	int i;
-	char *mac = NULL;
-
-	for (i = 0; i < 6; i++)
-	{
-		if (i != 5) {
-			snprintf(octet, sizeof(octet), "%02x:",
-			    (unsigned char)sdlstring[i]);
-		} else{
-			snprintf(octet, sizeof(octet), "%02x",
-			    (unsigned char)sdlstring[i]);
-		}
-		strcat(buf, octet);
-	}
-	mac = strdup(buf);
-	return (mac);
-}
-
-
 /*
  * Given the interface name, return the MAC address.
  */
@@ -602,7 +578,7 @@ kvp_if_name_to_mac(char *if_name)
 			sdl = (struct sockaddr_dl *)ifaddrs_ptr->ifa_addr;
 			if ((sdl->sdl_type == IFT_ETHER) &&
 			    (strcmp(ifaddrs_ptr->ifa_name, if_name) == 0)) {
-				mac_addr = get_mac_address(LLADDR(sdl));
+				mac_addr = strdup(ether_ntoa((struct ether_addr *)(LLADDR(sdl))));
 				break;
 			}
 		} while ((ifaddrs_ptr = ifaddrs_ptr->ifa_next) != NULL);
@@ -633,7 +609,7 @@ kvp_mac_to_if_name(char *mac)
 		do {
 			sdl = (struct sockaddr_dl *)ifaddrs_ptr->ifa_addr;
 			if (sdl->sdl_type == IFT_ETHER) {
-				buf_ptr = get_mac_address(LLADDR(sdl));
+				buf_ptr = strdup(ether_ntoa((struct ether_addr *)(LLADDR(sdl))));
 				for (i = 0; i < strlen(buf_ptr); i++)
 				{
 					buf_ptr[i] = toupper(buf_ptr[i]);
@@ -683,8 +659,8 @@ kvp_process_ipconfig_file(char *cmd,
 
 		x = strchr(p, '\n');
 		*x = '\0';
-		strcat(config_buf, p);
-		strcat(config_buf, ";");
+		strlcat(config_buf, p, len);
+		strlcat(config_buf, ";", len);
 	}
 	pclose(file);
 }
@@ -701,8 +677,7 @@ kvp_get_ipconfig_info(char *if_name, struct hv_kvp_ipaddr_value *buffer)
 	/*
 	 * Retrieve the IPV4 address of default gateway.
 	 */
-	sprintf(cmd, "%s %s", "netstat -rn | grep", if_name);
-	strcat(cmd, " | awk '/default/ {print $2 }'");
+	snprintf(cmd, sizeof(cmd), "netstat -rn | grep %s | awk '/default/ {print $2 }'", if_name);
 
 	/*
 	 * Execute the command to gather gateway IPV4 info.
@@ -713,8 +688,7 @@ kvp_get_ipconfig_info(char *if_name, struct hv_kvp_ipaddr_value *buffer)
 	/*
 	 * Retrieve the IPV6 address of default gateway.
 	 */
-	sprintf(cmd, "%s %s", "netstat -rn inet6 | grep", if_name);
-	strcat(cmd, " | awk '/default/ {print $2 }'");
+	snprintf(cmd, sizeof(cmd), "netstat -rn inet6 | grep %s | awk '/default/ {print $2 }", if_name);
 
 	/*
 	 * Execute the command to gather gateway IPV6 info.
@@ -733,7 +707,7 @@ kvp_get_ipconfig_info(char *if_name, struct hv_kvp_ipaddr_value *buffer)
 	 * .
 	 */
 	/* Scripts are stored in /usr/libexec/hyperv/ directory */
-	sprintf(cmd, "%s", "sh /usr/libexec/hyperv/hv_get_dns_info");
+	snprintf(cmd, sizeof(cmd), "%s", "sh /usr/libexec/hyperv/hv_get_dns_info");
 
 	/*
 	 * Execute the command to get DNS info.
@@ -750,7 +724,7 @@ kvp_get_ipconfig_info(char *if_name, struct hv_kvp_ipaddr_value *buffer)
 	 */
 
 
-	sprintf(cmd, "%s %s",
+	snprintf(cmd, sizeof(cmd), "%s %s",
 	    "sh /usr/libexec/hyperv/hv_get_dhcp_info", if_name);
 
 	file = popen(cmd, "r");
@@ -811,15 +785,15 @@ kvp_process_ip_address(void *addrp,
 		return (HV_KVP_E_FAIL);
 	}
 	if (str == NULL) {
-		strcpy(buffer, "inet_ntop failed\n");
+		strlcpy(buffer, "inet_ntop failed\n", length);
 		return (HV_KVP_E_FAIL);
 	}
 	if (*offset == 0) {
-		strcpy(buffer, tmp);
+		strlcpy(buffer, tmp, length);
 	} else{
-		strcat(buffer, tmp);
+		strlcat(buffer, tmp, length);
 	}
-	strcat(buffer, ";");
+	strlcat(buffer, ";", length);
 
 	*offset += strlen(str) + 1;
 	return (0);
@@ -836,24 +810,28 @@ kvp_get_ip_info(int family, char *if_name, int op,
 	int sn_offset = 0;
 	int error = 0;
 	char *buffer;
+	size_t buffer_length;
 	struct hv_kvp_ipaddr_value *ip_buffer;
 	char cidr_mask[5];
 	int weight;
 	int i;
 	unsigned int *w = NULL;
 	char *sn_str;
+	size_t sn_str_length;
 	struct sockaddr_in6 *addr6;
 
 	if (op == HV_KVP_OP_ENUMERATE) {
 		buffer = out_buffer;
+		buffer_length = length;
 	} else {
 		ip_buffer = out_buffer;
 		buffer = (char *)ip_buffer->ip_addr;
+		buffer_length = sizeof(ip_buffer->ip_addr);
 		ip_buffer->addr_family = 0;
 	}
 
 	if (getifaddrs(&ifap)) {
-		strcpy(buffer, "getifaddrs failed\n");
+		strlcpy(buffer, "getifaddrs failed\n", buffer_length);
 		return (HV_KVP_E_FAIL);
 	}
 
@@ -918,6 +896,7 @@ kvp_get_ip_info(int family, char *if_name, int op,
 				 */
 				weight = 0;
 				sn_str = (char *)ip_buffer->sub_net;
+				sn_str_length = sizeof(ip_buffer->sub_net);
 				addr6 = (struct sockaddr_in6 *)
 				    curp->ifa_netmask;
 				w = (unsigned int *)addr6->sin6_addr.s6_addr;
@@ -927,18 +906,18 @@ kvp_get_ip_info(int family, char *if_name, int op,
 					weight += hweight32(&w[i]);
 				}
 
-				sprintf(cidr_mask, "/%d", weight);
+				snprintf(cidr_mask, sizeof(cidr_mask), "/%d", weight);
 				if ((length - sn_offset) <
 				    (strlen(cidr_mask) + 1)) {
 					goto kvp_get_ip_info_ipaddr;
 				}
 
 				if (sn_offset == 0) {
-					strcpy(sn_str, cidr_mask);
+					strlcpy(sn_str, cidr_mask, sn_str_length);
 				} else{
-					strcat(sn_str, cidr_mask);
+					strlcat(sn_str, cidr_mask, sn_str_length);
 				}
-				strcat((char *)ip_buffer->sub_net, ";");
+				strlcat((char *)ip_buffer->sub_net, ";", sn_str_length);
 				sn_offset += strlen(sn_str) + 1;
 			}
 
@@ -1098,10 +1077,10 @@ kvp_get_domain_name(char *buffer, int length)
 
 	error = getaddrinfo(buffer, NULL, &hints, &info);
 	if (error != 0) {
-		strcpy(buffer, "getaddrinfo failed\n");
+		strlcpy(buffer, "getaddrinfo failed\n", length);
 		return (error);
 	}
-	strcpy(buffer, info->ai_canonname);
+	strlcpy(buffer, info->ai_canonname, length);
 	freeaddrinfo(info);
 	return (error);
 }
