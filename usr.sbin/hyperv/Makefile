@@ -1,4 +1,4 @@
-# $FreeBSD hyperv-ic Makefile  $
+# $FreeBSD$
 
 .include <bsd.own.mk>
 

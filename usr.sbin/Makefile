@@ -34,7 +34,6 @@ SUBDIR=	adduser \
 	getfmac \
 	getpmac \
 	gstat \
-	hyperv \
 	i2c \
 	ifmcstat \
 	inetd \

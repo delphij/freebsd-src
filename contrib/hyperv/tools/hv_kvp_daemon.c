@@ -732,8 +732,8 @@ kvp_get_ipconfig_info(char *if_name, struct hv_kvp_ipaddr_value *buffer)
 	 * .
 	 * .
 	 */
-	/* Scripts are stored in /var/db/hyperv/scripts/ directory */
-	sprintf(cmd, "%s", "sh KVB_DB_DIR/scripts/hv_get_dns_info");
+	/* Scripts are stored in /usr/libexec/hyperv/ directory */
+	sprintf(cmd, "%s", "sh /usr/libexec/hyperv/hv_get_dns_info");
 
 	/*
 	 * Execute the command to get DNS info.
@@ -751,7 +751,7 @@ kvp_get_ipconfig_info(char *if_name, struct hv_kvp_ipaddr_value *buffer)
 
 
 	sprintf(cmd, "%s %s",
-	    "sh /var/db/hyperv/scripts/hv_get_dhcp_info", if_name);
+	    "sh /usr/libexec/hyperv/hv_get_dhcp_info", if_name);
 
 	file = popen(cmd, "r");
 	if (file == NULL) {
@@ -1072,7 +1072,7 @@ kvp_set_ip_info(char *if_name, struct hv_kvp_ipaddr_value *new_val)
 	 */
 
 	snprintf(cmd, sizeof(cmd), "%s %s",
-	    "sh /var/db/hyperv/scripts/hv_set_ifconfig", if_file);
+	    "sh /usr/libexec/hyperv/hv_set_ifconfig", if_file);
 	system(cmd);
 	return (0);
 

@@ -18,6 +18,7 @@ SUBDIR+=	boot0cfg
 SUBDIR+=	btxld
 .endif
 SUBDIR+=	cpucontrol
+SUBDIR+=	hyperv
 SUBDIR+=	kgmon
 SUBDIR+=	lptcontrol
 SUBDIR+=	mount_smbfs

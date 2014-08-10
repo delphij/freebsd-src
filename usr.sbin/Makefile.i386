@@ -9,6 +9,7 @@ SUBDIR+=	asf
 SUBDIR+=	btxld
 .endif
 SUBDIR+=	cpucontrol
+SUBDIR+=	hyperv
 SUBDIR+=	kgmon
 SUBDIR+=	kgzip
 SUBDIR+=	lptcontrol
