@@ -57,6 +57,7 @@ FILES=	DAEMON \
 	hostid \
 	hostid_save \
 	hostname \
+	hv_kvpd \
 	inetd \
 	initrandom \
 	ip6addrctl \
