@@ -218,7 +218,7 @@ struct hv_kvp_register {
 struct hv_kvp_msg {
 	union {
 		struct hv_kvp_hdr kvp_hdr;
-		int error;
+		uint32_t error;
 	} hdr;
 	union {
 		struct hv_kvp_msg_get		kvp_get;
