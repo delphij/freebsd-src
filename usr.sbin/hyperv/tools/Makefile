@@ -9,5 +9,6 @@ PROG= 	hv_kvp_daemon
 MAN= 	hv_kvp_daemon.8	
 
 CFLAGS+=	-I${.CURDIR}/../../../sys/dev/hyperv/utilities
+WARNS?=	3
 
 .include <bsd.prog.mk>

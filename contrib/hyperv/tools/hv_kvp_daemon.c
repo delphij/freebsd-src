@@ -101,12 +101,12 @@ static struct kvp_op_hdlr kvp_op_hdlrs[HV_KVP_OP_COUNT];
 
 /* OS information */
 
-static char *os_name = "";
-static char *os_major = "";
-static char *os_minor = "";
-static char *processor_arch;
-static char *os_build;
-static char *lic_version = "BSD Pre-Release version";
+static const char *os_name = "";
+static const char *os_major = "";
+static const char *os_minor = "";
+static const char *processor_arch;
+static const char *os_build;
+static const char *lic_version = "BSD Pre-Release version";
 static struct utsname uts_buf;
 
 /* Global flags */
@@ -533,7 +533,7 @@ kvp_pool_enumerate(int pool, int index, __u8 *key, int key_size,
 }
 
 
-void
+static void
 kvp_get_os_info(void)
 {
 	char *p;
@@ -599,7 +599,8 @@ kvp_mac_to_if_name(char *mac)
 	struct ifaddrs *ifaddrs_ptr;
 	struct ifaddrs *head_ifaddrs_ptr;
 	struct sockaddr_dl *sdl;
-	int status, i;
+	int status;
+	size_t i;
 	char *buf_ptr;
 
 	status = getifaddrs(&ifaddrs_ptr);
@@ -633,8 +634,8 @@ kvp_mac_to_if_name(char *mac)
 
 static void
 kvp_process_ipconfig_file(char *cmd,
-    char *config_buf, int len,
-    int element_size, int offset)
+    char *config_buf, size_t len,
+    size_t element_size, int offset)
 {
 	char buf[256];
 	char *p;
@@ -802,7 +803,7 @@ kvp_process_ip_address(void *addrp,
 
 static int
 kvp_get_ip_info(int family, char *if_name, int op,
-    void *out_buffer, int length)
+    void *out_buffer, size_t length)
 {
 	struct ifaddrs *ifap;
 	struct ifaddrs *curp;
@@ -947,7 +948,7 @@ kvp_get_ip_info_done:
 
 
 static int
-kvp_write_file(FILE *f, char *s1, char *s2, char *s3)
+kvp_write_file(FILE *f, const char *s1, const char *s2, const char *s3)
 {
 	int ret;
 
@@ -1087,7 +1088,7 @@ kvp_get_domain_name(char *buffer, int length)
 
 
 static int
-kvp_op_getipinfo(struct hv_kvp_msg *op_msg, void *data)
+kvp_op_getipinfo(struct hv_kvp_msg *op_msg, void *data __unused)
 {
 	struct hv_kvp_ipaddr_value *ip_val;
 	char *if_name;
@@ -1117,7 +1118,7 @@ kvp_op_getipinfo_done:
 
 
 static int
-kvp_op_setipinfo(struct hv_kvp_msg *op_msg, void *data)
+kvp_op_setipinfo(struct hv_kvp_msg *op_msg, void *data __unused)
 {
 	struct hv_kvp_ipaddr_value *ip_val;
 	char *if_name;
@@ -1205,7 +1206,7 @@ kvp_op_setgetdel(struct hv_kvp_msg *op_msg, void *data)
 
 
 static int
-kvp_op_enumerate(struct hv_kvp_msg *op_msg, void *data)
+kvp_op_enumerate(struct hv_kvp_msg *op_msg, void *data __unused)
 {
 	char *key_name, *key_value;
 	int error = 0;
