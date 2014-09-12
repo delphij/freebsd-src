@@ -575,7 +575,7 @@ kvp_if_name_to_mac(char *if_name)
 	if (status >= 0) {
 		head_ifaddrs_ptr = ifaddrs_ptr;
 		do {
-			sdl = (struct sockaddr_dl *)ifaddrs_ptr->ifa_addr;
+			sdl = (struct sockaddr_dl *)(uintptr_t)ifaddrs_ptr->ifa_addr;
 			if ((sdl->sdl_type == IFT_ETHER) &&
 			    (strcmp(ifaddrs_ptr->ifa_name, if_name) == 0)) {
 				mac_addr = strdup(ether_ntoa((struct ether_addr *)(LLADDR(sdl))));
@@ -608,7 +608,7 @@ kvp_mac_to_if_name(char *mac)
 	if (status >= 0) {
 		head_ifaddrs_ptr = ifaddrs_ptr;
 		do {
-			sdl = (struct sockaddr_dl *)ifaddrs_ptr->ifa_addr;
+			sdl = (struct sockaddr_dl *)(uintptr_t)ifaddrs_ptr->ifa_addr;
 			if (sdl->sdl_type == IFT_ETHER) {
 				buf_ptr = strdup(ether_ntoa((struct ether_addr *)(LLADDR(sdl))));
 				for (i = 0; i < strlen(buf_ptr); i++)
@@ -898,9 +898,9 @@ kvp_get_ip_info(int family, char *if_name, int op,
 				weight = 0;
 				sn_str = (char *)ip_buffer->sub_net;
 				sn_str_length = sizeof(ip_buffer->sub_net);
-				addr6 = (struct sockaddr_in6 *)
+				addr6 = (struct sockaddr_in6 *)(uintptr_t)
 				    curp->ifa_netmask;
-				w = (unsigned int *)addr6->sin6_addr.s6_addr;
+				w = (unsigned int *)(uintptr_t)addr6->sin6_addr.s6_addr;
 
 				for (i = 0; i < 4; i++)
 				{
