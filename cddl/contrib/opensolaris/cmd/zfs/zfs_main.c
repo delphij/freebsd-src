@@ -263,9 +263,11 @@ get_usage(zfs_help_t idx)
 	case HELP_PROMOTE:
 		return (gettext("\tpromote <clone-filesystem>\n"));
 	case HELP_RECEIVE:
-		return (gettext("\treceive|recv [-vnFu] <filesystem|volume|"
-		    "snapshot>\n"
-		    "\treceive|recv [-vnFu] [-o origin=<snapshot>] [-d | -e] "
+		return (gettext("\treceive|recv [-vnFu] "
+		    "[-o <property>] ... [-x <property>] ... [-l <filesystem|volume>] ... "
+		    "<filesystem|volume|snapshot>\n"
+		    "\treceive|recv [-vnFu] [-d | -e] "
+		    "[-o <property>] ... [-x <property>] ... [-l <filesystem|volume>] ... "
 		    "<filesystem>\n"));
 	case HELP_RENAME:
 		return (gettext("\trename [-f] <filesystem|volume|snapshot> "
@@ -494,6 +496,21 @@ usage(boolean_t requested)
 	}
 
 	exit(requested ? 0 : 2);
+}
+
+static int
+parsepropname(nvlist_t *props)
+{
+	char *propname = optarg;
+
+	if (nvlist_lookup_string(props, propname, NULL) == 0) {
+		(void) fprintf(stderr, gettext("property '%s' "
+		    "specified multiple times\n"), propname);
+		return (-1);
+	}
+	if (nvlist_add_boolean(props, propname))
+		nomem();
+	return (0);
 }
 
 static int
@@ -3910,28 +3927,27 @@ zfs_do_send(int argc, char **argv)
 }
 
 /*
- * zfs receive [-vnFu] [-d | -e] <fs@snap>
+ * zfs receive [-vnFu] [-d | -e] [-l <volume|filesystem>] ...
+ * [-o property=value] ... [-x property] ... <volume|filesytem|snapshot>
  *
  * Restore a backup stream from stdin.
  */
 static int
 zfs_do_receive(int argc, char **argv)
 {
+	nvlist_t *props, *limitds;
 	int c, err;
 	recvflags_t flags = { 0 };
-	nvlist_t *props;
-	nvpair_t *nvp = NULL;
 
 	if (nvlist_alloc(&props, NV_UNIQUE_NAME, 0) != 0)
 		nomem();
+	if (nvlist_alloc(&limitds, NV_UNIQUE_NAME, 0) != 0)
+		nomem();
+
 
 	/* check options */
-	while ((c = getopt(argc, argv, ":o:denuvF")) != -1) {
+	while ((c = getopt(argc, argv, ":del:no:uvx:F")) != -1) {
 		switch (c) {
-		case 'o':
-			if (parseprop(props, optarg) != 0)
-				return (1);
-			break;
 		case 'd':
 			flags.isprefix = B_TRUE;
 			break;
@@ -3939,14 +3955,32 @@ zfs_do_receive(int argc, char **argv)
 			flags.isprefix = B_TRUE;
 			flags.istail = B_TRUE;
 			break;
+		case 'l':
+			if (parsepropname(limitds)) {
+				err = 1;
+				goto recverror;
+			}
+			break;
 		case 'n':
 			flags.dryrun = B_TRUE;
+			break;
+		case 'o':
+			if (parseprop(props)) {
+				err = 1;
+				goto recverror;
+			}
 			break;
 		case 'u':
 			flags.nomount = B_TRUE;
 			break;
 		case 'v':
 			flags.verbose = B_TRUE;
+			break;
+		case 'x':
+			if (parsepropname(props)) {
+				err = 1;
+				goto recverror;
+			}
 			break;
 		case 'F':
 			flags.force = B_TRUE;
@@ -3976,13 +4010,6 @@ zfs_do_receive(int argc, char **argv)
 		usage(B_FALSE);
 	}
 
-	while ((nvp = nvlist_next_nvpair(props, nvp))) {
-		if (strcmp(nvpair_name(nvp), "origin") != 0) {
-			(void) fprintf(stderr, gettext("invalid option"));
-			usage(B_FALSE);
-		}
-	}
-
 	if (isatty(STDIN_FILENO)) {
 		(void) fprintf(stderr,
 		    gettext("Error: Backup stream can not be read "
@@ -3991,7 +4018,24 @@ zfs_do_receive(int argc, char **argv)
 		return (1);
 	}
 
-	err = zfs_receive(g_zfs, argv[0], props, &flags, STDIN_FILENO, NULL);
+	if (nvlist_empty(props)) {
+		nvlist_free(props);
+		props = NULL;
+	}
+
+	if (nvlist_empty(limitds)) {
+		nvlist_free(limitds);
+		limitds = NULL;
+	}
+
+	err = zfs_receive(g_zfs, argv[0], &flags, STDIN_FILENO, props, limitds, NULL);
+
+recverror:
+	if (props != NULL)
+		nvlist_free(props);
+
+	if (limitds != NULL)
+		nvlist_free(limitds);
 
 	return (err != 0);
 }
