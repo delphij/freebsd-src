@@ -3965,7 +3965,7 @@ zfs_do_receive(int argc, char **argv)
 			flags.dryrun = B_TRUE;
 			break;
 		case 'o':
-			if (parseprop(props)) {
+			if (parseprop(props, optarg)) {
 				err = 1;
 				goto recverror;
 			}
