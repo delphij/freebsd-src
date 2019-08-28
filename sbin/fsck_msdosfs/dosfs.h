@@ -87,7 +87,6 @@ struct fatEntry {
 	cl_t	next;			/* pointer to next cluster */
 	cl_t	head;			/* pointer to start of chain */
 	u_int32_t length;		/* number of clusters on chain */
-	int	flags;			/* see below */
 };
 
 #define	CLUST_FREE	0		/* 0 means cluster is free */
@@ -103,8 +102,6 @@ struct fatEntry {
 #define	CLUST12_MASK	0xfff
 #define	CLUST16_MASK	0xffff
 #define	CLUST32_MASK	0xfffffff
-
-#define	FAT_USED	1		/* This fat chain is used in a file */
 
 #define	DOSLONGNAMELEN	256		/* long name maximal length */
 #define LRFIRST		0x40		/* first long name record */
