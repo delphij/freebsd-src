@@ -257,7 +257,7 @@ resetDosDirSection(struct bootblock *boot, struct fatEntry *fat)
 			return FSFATAL;
 		}
 
-		fat[boot->bpbRootClust].flags |= FAT_USED;
+		fat_set_cl_used(boot->bpbRootClust);
 		rootDir->head = boot->bpbRootClust;
 	}
 
@@ -818,7 +818,7 @@ readDosDirSection(int f, struct bootblock *boot, struct fatEntry *fat,
 			}
 
 			if (dirent.head >= CLUST_FIRST && dirent.head < boot->NumClusters)
-				fat[dirent.head].flags |= FAT_USED;
+				fat_set_cl_used(dirent.head);
 
 			if (dirent.flags & ATTR_DIRECTORY) {
 				/*
@@ -1097,7 +1097,7 @@ reconnect(int dosfs, struct bootblock *boot, struct fatEntry *fat, cl_t head)
 	p[29] = (u_char)(d.size >> 8);
 	p[30] = (u_char)(d.size >> 16);
 	p[31] = (u_char)(d.size >> 24);
-	fat[head].flags |= FAT_USED;
+	fat_set_cl_used(head);
 	if (lseek(dosfs, lfoff, SEEK_SET) != lfoff
 	    || (size_t)write(dosfs, lfbuf, boot->ClusterSize) != boot->ClusterSize) {
 		perr("could not write LOST.DIR");

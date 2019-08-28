@@ -32,6 +32,8 @@
 
 #include <sys/types.h>
 
+#include <stdbool.h>
+
 #include "dosfs.h"
 
 #define	LOSTDIR	"LOST.DIR"
@@ -84,6 +86,12 @@ int readboot(int, struct bootblock *);
  * Correct the FSInfo block.
  */
 int writefsinfo(int, struct bootblock *);
+
+/* Mark a cluster as used */
+void fat_set_cl_used(cl_t);
+
+/* Whether a cluster is previously marked as used */
+bool fat_get_cl_used(cl_t);
 
 /*
  * Read one of the FAT copies and return a pointer to the new

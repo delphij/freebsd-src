@@ -33,6 +33,10 @@ static const char rcsid[] =
   "$FreeBSD$";
 #endif /* not lint */
 
+#include <sys/limits.h>
+#include <sys/param.h>
+
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -46,6 +50,35 @@ static int checkclnum(struct bootblock *, u_int, cl_t, cl_t *);
 static int clustdiffer(cl_t, cl_t *, cl_t *, u_int);
 static int tryclear(struct bootblock *, struct fatEntry *, cl_t, cl_t *);
 static int _readfat(int, struct bootblock *, u_int, u_char **);
+
+/*
+ * Used bitmap of FAT.
+ *
+ * When traversing directories from the root directory to all
+ * subdirectories, all referenced clusters are marked as "USED",
+ * this will be used for later checklost(), where any cluster chains
+ * that are not referenced shall be cleared or added to lost+found.
+ *
+ * The bitmap is fairly straightforward 1:1 mapping of cluster number
+ * to bits.  It is initialized by readfat() and free'ed by checklost().
+ */
+static unsigned long	*usedbitmap;
+
+void fat_set_cl_used(cl_t cl)
+{
+	cl_t i = cl / LONG_BIT;
+	unsigned long usedbit = 1UL << (cl % LONG_BIT);
+
+	usedbitmap[i] |= usedbit;
+}
+
+bool fat_get_cl_used(cl_t cl)
+{
+	cl_t i = cl / LONG_BIT;
+	unsigned long usedbit = 1UL << (cl % LONG_BIT);
+
+	return ((usedbitmap[i] & usedbit) == usedbit);
+}
 
 /*-
  * The first 2 FAT entries contain pseudo-cluster numbers with the following
@@ -216,6 +249,16 @@ readfat(int fs, struct bootblock *boot, u_int no, struct fatEntry **fp)
 		perr("No space for FAT clusters (%zu)",
 		    (size_t)boot->NumClusters);
 		free(buffer);
+		return FSFATAL;
+	}
+
+	free(usedbitmap);
+	usedbitmap = calloc(1, roundup2(boot->NumClusters, LONG_BIT) / (LONG_BIT / 8));
+	if (usedbitmap == NULL) {
+		perr("No space for used map for FAT clusters (%zu)",
+		    (size_t)boot->NumClusters);
+		free(buffer);
+		free(fat);
 		return FSFATAL;
 	}
 
@@ -678,7 +721,7 @@ checklost(int dosfs, struct bootblock *boot, struct fatEntry *fat)
 		    || fat[head].next == CLUST_FREE
 		    || (fat[head].next >= CLUST_RSRVD
 			&& fat[head].next < CLUST_EOFS)
-		    || (fat[head].flags & FAT_USED))
+		    || (fat_get_cl_used(head)))
 			continue;
 
 		pwarn("Lost cluster chain at cluster %u\n%d Cluster(s) lost\n",
@@ -722,5 +765,7 @@ checklost(int dosfs, struct bootblock *boot, struct fatEntry *fat)
 			mod |= writefsinfo(dosfs, boot);
 	}
 
+	free(usedbitmap);
+	usedbitmap = NULL;
 	return mod;
 }
