@@ -95,6 +95,7 @@ struct fatEntry {
 #define	CLUST_BAD	0xfffffff7	/* a cluster with a defect */
 #define	CLUST_EOFS	0xfffffff8	/* start of EOF indicators */
 #define	CLUST_EOF	0xffffffff	/* standard value for last cluster */
+#define	CLUST_DEAD	0xfdeadc0d	/* error encountered */
 
 /*
  * Masks for cluster values

@@ -93,6 +93,13 @@ void fat_set_cl_used(cl_t);
 /* Whether a cluster is previously marked as used */
 bool fat_get_cl_used(cl_t);
 
+/* Opaque type */
+struct fat_descriptor;
+
+cl_t fat_get_cl_next(struct fat_descriptor *, cl_t);
+
+int fat_set_cl_next(struct fat_descriptor *, cl_t, cl_t);
+
 /*
  * Read one of the FAT copies and return a pointer to the new
  * allocated array holding our description of it.
