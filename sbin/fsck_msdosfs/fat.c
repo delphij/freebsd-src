@@ -1,6 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
+ * Copyright (c) 2019 Google LLC
  * Copyright (C) 1995, 1996, 1997 Wolfgang Solfrank
  * Copyright (c) 1995 Martin Husemann
  *
@@ -33,6 +34,7 @@ static const char rcsid[] =
   "$FreeBSD$";
 #endif /* not lint */
 
+#include <sys/endian.h>
 #include <sys/limits.h>
 #include <sys/param.h>
 
@@ -78,6 +80,179 @@ bool fat_get_cl_used(cl_t cl)
 	unsigned long usedbit = 1UL << (cl % LONG_BIT);
 
 	return ((usedbitmap[i] & usedbit) == usedbit);
+}
+
+/*
+ * FAT table descriptor, represents a FAT table that is already loaded
+ * into memory.
+ */
+struct fat_descriptor {
+	struct bootblock *boot;
+	size_t		  fatsize;
+	uint8_t		 *fatbuf;
+};
+
+/*
+ * FAT12 accessors.
+ *
+ * FAT12s are sufficiently small, expect it to always fit in the RAM.
+ */
+static cl_t
+fat_get_fat12_next(struct fat_descriptor *fat, cl_t cl)
+{
+	const uint8_t	*p;
+	cl_t	retval;
+
+	p = fat->fatbuf + (cl + (cl >> 1));
+	retval = le16dec(p);
+	/* Odd cluster: lower 4 bits belongs to the subsequent cluster */
+	if ((cl & 1) == 1)
+		retval >>= 4;
+	retval &= CLUST12_MASK;
+
+	if (retval >= (CLUST_BAD & CLUST12_MASK))
+		retval |= ~CLUST12_MASK;
+
+	return (retval);
+}
+
+static int
+fat_set_fat12_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
+{
+	uint8_t	*p;
+
+	/* Truncate 'nextcl' value, if needed */
+	nextcl &= CLUST12_MASK;
+
+	p = fat->fatbuf + (cl + (cl >> 1));
+
+	/*
+	 * Read in the 4 bits from the subsequent (for even clusters)
+	 * or the preceding (for odd clusters) cluster and combine
+	 * it to the nextcl value for encoding
+	 */
+	if ((cl & 1) == 0) {
+		nextcl |= ((p[1] & 0xf0) << 8);
+	} else {
+		nextcl <<= 4;
+		nextcl |= (p[0] & 0x0f);
+	}
+
+	le16enc(p, (uint16_t)nextcl);
+
+	return (0);
+}
+
+/*
+ * FAT16 accessors.
+ *
+ * FAT16s are sufficiently small, expect it to always fit in the RAM.
+ */
+static cl_t
+fat_get_fat16_next(struct fat_descriptor *fat, cl_t cl)
+{
+	const uint8_t	*p;
+	cl_t	retval;
+
+	p = fat->fatbuf + (cl << 1);
+	retval = le16dec(p) & CLUST16_MASK;
+
+	if (retval >= (CLUST_BAD & CLUST16_MASK))
+		retval |= ~CLUST16_MASK;
+
+	return (retval);
+}
+
+static int
+fat_set_fat16_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
+{
+	uint8_t	*p;
+
+	/* Truncate 'nextcl' value, if needed */
+	nextcl &= CLUST16_MASK;
+
+	p = fat->fatbuf + (cl << 1);
+
+	le16enc(p, (uint16_t)nextcl);
+
+	return (0);
+}
+
+/*
+ * FAT32 accessors.
+ *
+ * TODO(delphij): paging/mmap support
+ */
+static cl_t
+fat_get_fat32_next(struct fat_descriptor *fat, cl_t cl)
+{
+	const uint8_t	*p;
+	cl_t	retval;
+
+	p = fat->fatbuf + (cl << 2);
+	retval = le32dec(p) & CLUST32_MASK;
+
+	if (retval >= (CLUST_BAD & CLUST32_MASK))
+		retval |= ~CLUST32_MASK;
+
+	return (retval);
+}
+
+static int
+fat_set_fat32_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
+{
+	uint8_t	*p;
+
+	/* Truncate 'nextcl' value, if needed */
+	nextcl &= CLUST32_MASK;
+
+	p = fat->fatbuf + (cl << 2);
+
+	le32enc(p, (uint32_t)nextcl);
+
+	return (0);
+}
+
+cl_t fat_get_cl_next(struct fat_descriptor *fat, cl_t cl)
+{
+	cl_t retval = CLUST_DEAD;
+
+	switch (fat->boot->ClustMask) {
+	case CLUST12_MASK:
+		retval = fat_get_fat12_next(fat, cl);
+		break;
+	case CLUST16_MASK:
+		retval = fat_get_fat16_next(fat, cl);
+		break;
+	case CLUST32_MASK:
+		retval = fat_get_fat32_next(fat, cl);
+		break;
+	default:
+		pfatal("Invalid ClustMask: %d", fat->boot->ClustMask);
+		break;
+	}
+	return (retval);
+}
+
+int fat_set_cl_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
+{
+	int retval = FSFATAL;
+
+	switch (fat->boot->ClustMask) {
+	case CLUST12_MASK:
+		retval = fat_set_fat12_next(fat, cl, nextcl);
+		break;
+	case CLUST16_MASK:
+		retval = fat_set_fat16_next(fat, cl, nextcl);
+		break;
+	case CLUST32_MASK:
+		retval = fat_set_fat32_next(fat, cl, nextcl);
+		break;
+	default:
+		pfatal("Invalid ClustMask: %d", fat->boot->ClustMask);
+		break;
+	}
+	return (retval);
 }
 
 /*-
