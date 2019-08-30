@@ -89,9 +89,13 @@ int writefsinfo(int, struct bootblock *);
 
 /* Mark a cluster as used */
 void fat_set_cl_used(cl_t);
+void fat_clear_cl_used(cl_t cl);
 
 /* Whether a cluster is previously marked as used */
-bool fat_get_cl_used(cl_t);
+bool fat_is_cl_used(cl_t);
+
+void fat_clear_cl_head(cl_t);
+bool fat_is_cl_head(cl_t);
 
 /* Opaque type */
 struct fat_descriptor;
@@ -100,46 +104,44 @@ cl_t fat_get_cl_next(struct fat_descriptor *, cl_t);
 
 int fat_set_cl_next(struct fat_descriptor *, cl_t, cl_t);
 
-/*
- * Read one of the FAT copies and return a pointer to the new
- * allocated array holding our description of it.
- */
-int readfat(int, struct bootblock *, u_int, struct fatEntry **);
+struct bootblock* fat_get_boot(struct fat_descriptor *);
 
 /*
- * Check two FAT copies for consistency and merge changes into the
- * first if necessary.
+ * Read the FAT 0 and return a pointer to the newly allocated
+ * descriptor of it.
  */
-int comparefat(struct bootblock *, struct fatEntry *, struct fatEntry *, u_int);
+int readfat(int, struct bootblock *, struct fat_descriptor **);
 
 /*
  * Check a FAT
  */
-int checkfat(struct bootblock *, struct fatEntry *);
+int checkfat(struct bootblock *, struct fat_descriptor *);
 
 /*
  * Write back FAT entries
  */
-int writefat(int, struct bootblock *, struct fatEntry *, int);
+int writefat(int, struct bootblock *, struct fat_descriptor *);
 
 /*
  * Read a directory
  */
-int resetDosDirSection(struct bootblock *, struct fatEntry *);
+int resetDosDirSection(struct bootblock *, struct fat_descriptor *);
 void finishDosDirSection(void);
-int handleDirTree(int, struct bootblock *, struct fatEntry *);
+int handleDirTree(int, struct bootblock *, struct fat_descriptor *);
 
 /*
  * Cross-check routines run after everything is completely in memory
  */
+int checkchain(struct fat_descriptor *, cl_t, size_t *);
+
 /*
  * Check for lost cluster chains
  */
-int checklost(int, struct bootblock *, struct fatEntry *);
+int checklost(int, struct bootblock *, struct fat_descriptor *);
 /*
  * Try to reconnect a lost cluster chain
  */
-int reconnect(int, struct bootblock *, struct fatEntry *, cl_t);
+int reconnect(int, struct fat_descriptor *, cl_t, size_t);
 void finishlf(void);
 
 /*
@@ -153,6 +155,6 @@ const char *rsrvdcltype(cl_t);
 /*
  * Clear a cluster chain in a FAT
  */
-void clearchain(struct bootblock *, struct fatEntry *, cl_t);
+void clearchain(struct bootblock *, struct fat_descriptor *, cl_t);
 
 #endif

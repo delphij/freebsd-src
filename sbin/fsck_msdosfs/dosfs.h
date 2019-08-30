@@ -83,12 +83,6 @@ struct bootblock {
 	u_int	NumBad;			/* # of bad clusters */
 };
 
-struct fatEntry {
-	cl_t	next;			/* pointer to next cluster */
-	cl_t	head;			/* pointer to start of chain */
-	u_int32_t length;		/* number of clusters on chain */
-};
-
 #define	CLUST_FREE	0		/* 0 means cluster is free */
 #define	CLUST_FIRST	2		/* 2 is the minimum valid cluster number */
 #define	CLUST_RSRVD	0xfffffff6	/* start of reserved clusters */
@@ -122,6 +116,7 @@ struct dosDirEntry {
 	uint flags;			/* attributes */
 	cl_t head;			/* cluster no */
 	u_int32_t size;			/* filesize in bytes */
+	u_int32_t psize;		/* physical size in bytes */
 	uint fsckflags;			/* flags during fsck */
 };
 /* Flags in fsckflags: */
