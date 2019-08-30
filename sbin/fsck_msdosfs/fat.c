@@ -36,8 +36,10 @@ static const char rcsid[] =
 
 #include <sys/endian.h>
 #include <sys/limits.h>
+#include <sys/mman.h>
 #include <sys/param.h>
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,38 +50,167 @@ static const char rcsid[] =
 #include "ext.h"
 #include "fsutil.h"
 
-static int checkclnum(struct bootblock *, u_int, cl_t, cl_t *);
-static int clustdiffer(cl_t, cl_t *, cl_t *, u_int);
-static int tryclear(struct bootblock *, struct fatEntry *, cl_t, cl_t *);
-static int _readfat(int, struct bootblock *, u_int, u_char **);
+static int _readfat(int, struct bootblock *, u_char **);
+
+static bool is_mmapped;
 
 /*
- * Used bitmap of FAT.
+ * Used and head bitmaps for FAT scanning.
  *
- * When traversing directories from the root directory to all
- * subdirectories, all referenced clusters are marked as "USED",
- * this will be used for later checklost(), where any cluster chains
- * that are not referenced shall be cleared or added to lost+found.
+ * FAT32 have up to 2^28 = 256M entries, and FAT16/12 have much less.
+ * For each cluster, we use 1 bit to represent if it's "used"
+ * (referenced by any file or directory), and another to represent if
+ * it's a head cluster (the first cluster of a cluster chain).
  *
- * The bitmap is fairly straightforward 1:1 mapping of cluster number
- * to bits.  It is initialized by readfat() and free'ed by checklost().
+ * Head bitmap
+ * ===========
+ * Initially, we set all bits to 1.  In readfat(), we traverse the
+ * whole FAT and mark each cluster identified as "next" cluster as
+ * 0.  After the scan, we have a bitmap with 1's to indicate the
+ * corresponding cluster was a "head" cluster.
+ *
+ * We use head bitmap to identify lost chains: a head cluster that was
+ * not being claimed by any file or directories is the head cluster of
+ * a lost chain.
+ *
+ * Used bitmap
+ * ===========
+ * Initially, we set all bits to 0.  As we traverse the directory
+ * structure, we first check if the head cluster referenced by the
+ * directory entry was a head cluster, and if it was, we mark the
+ * whole chain as being used and clear the head map bit.
+ *
+ * The used bitmap have two purposes: first, we can immediately find
+ * out a cross chain because the node must have been already marked
+ * as used in a previous scan; second, if we do not care about lost
+ * chains, the data can immediately be used for clearing the unclaimed
+ * yet non-zero clusters from the FAT, similar to a "mark and sweep"
+ * garbage collection.
+ *
+ * Handle of lost chains
+ * =====================
+ * At the end of scanning, we can easily find all lost chain's heads
+ * by finding out the 1's in the head bitmap.
  */
-static unsigned long	*usedbitmap;
+typedef struct long_bitmap {
+	size_t		 count;
+	unsigned long	*map;
+} long_bitmap_t;
+static long_bitmap_t	usedbitmap;
+static long_bitmap_t	headbitmap;
 
-void fat_set_cl_used(cl_t cl)
+static inline void
+bitmap_set(long_bitmap_t *lbp, cl_t cl)
 {
 	cl_t i = cl / LONG_BIT;
-	unsigned long usedbit = 1UL << (cl % LONG_BIT);
+	unsigned long setbit = 1UL << (cl % LONG_BIT);
 
-	usedbitmap[i] |= usedbit;
+	assert((lbp->map[i] & setbit) == 0);
+	lbp->map[i] |= setbit;
+	lbp->count++;
+
 }
 
-bool fat_get_cl_used(cl_t cl)
+static inline void
+bitmap_clear(long_bitmap_t *lbp, cl_t cl)
+{
+	cl_t i = cl / LONG_BIT;
+	unsigned long clearmask = ~(1UL << (cl % LONG_BIT));
+
+	assert((lbp->map[i] & ~clearmask) != 0);
+	lbp->map[i] &= clearmask;
+	lbp->count--;
+}
+
+static inline bool
+bitmap_get(long_bitmap_t *lbp, cl_t cl)
 {
 	cl_t i = cl / LONG_BIT;
 	unsigned long usedbit = 1UL << (cl % LONG_BIT);
 
-	return ((usedbitmap[i] & usedbit) == usedbit);
+	return ((lbp->map[i] & usedbit) == usedbit);
+}
+
+static inline bool
+bitmap_any_in_range(long_bitmap_t *lbp, cl_t cl)
+{
+	cl_t i = cl / LONG_BIT;
+
+	return (lbp->map[i] == 0);
+}
+
+static inline size_t
+bitmap_count(long_bitmap_t *lbp)
+{
+	return (lbp->count);
+}
+
+static int
+bitmap_ctor(long_bitmap_t *lbp, size_t bits, bool allone)
+{
+	size_t bitmap_size = roundup2(bits, LONG_BIT) / (LONG_BIT / 8);
+
+	free(lbp->map);
+	lbp->map = calloc(1, bitmap_size);
+	if (lbp->map == NULL)
+		return FSFATAL;
+
+	if (allone) {
+		memset(lbp->map, 0xff, bitmap_size);
+		lbp->count = bits;
+	} else {
+		lbp->count = 0;
+	}
+	return FSOK;
+}
+
+static void
+bitmap_dtor(long_bitmap_t *lbp)
+{
+	free(lbp->map);
+	lbp->map = NULL;
+}
+
+void
+fat_set_cl_used(cl_t cl)
+{
+	bitmap_set(&usedbitmap, cl);
+}
+
+void
+fat_clear_cl_used(cl_t cl)
+{
+	bitmap_clear(&usedbitmap, cl);
+}
+
+bool
+fat_is_cl_used(cl_t cl)
+{
+	return (bitmap_get(&usedbitmap, cl));
+}
+
+void
+fat_clear_cl_head(cl_t cl)
+{
+	bitmap_clear(&headbitmap, cl);
+}
+
+bool
+fat_is_cl_head(cl_t cl)
+{
+	return (bitmap_get(&headbitmap, cl));
+}
+
+static inline bool
+fat_is_cl_head_in_range(cl_t cl)
+{
+	return (bitmap_any_in_range(&headbitmap, cl));
+}
+
+static size_t
+fat_get_head_count(void)
+{
+	return (bitmap_count(&headbitmap));
 }
 
 /*
@@ -100,7 +231,7 @@ struct fat_descriptor {
 static uint8_t *
 fat_get_fat12_ptr(struct fat_descriptor *fat, cl_t cl)
 {
-	return (fat->fatbuf + ((cl + (cl >> 1));
+	return (fat->fatbuf + ((cl + (cl >> 1))));
 }
 
 static cl_t
@@ -193,12 +324,12 @@ fat_set_fat16_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 /*
  * FAT32 accessors.
  *
- * TODO(delphij): paging/mmap support
+ * TODO(delphij): paging support
  */
 static uint8_t *
-fat_get_fat32_ptr(struct fat_descriptor *fat, cl_t cl)
+fat_get_fat32_ptr(struct fat_descriptor *fat, cl_t cl, bool write __unused)
 {
-	return (fat->fatbuf + (cl << 2););
+	return (fat->fatbuf + (cl << 2));
 }
 
 static cl_t
@@ -207,7 +338,7 @@ fat_get_fat32_next(struct fat_descriptor *fat, cl_t cl)
 	const uint8_t	*p;
 	cl_t	retval;
 
-	p = fat_get_fat32_ptr(fat, cl);
+	p = fat_get_fat32_ptr(fat, cl, false);
 	retval = le32dec(p) & CLUST32_MASK;
 
 	if (retval >= (CLUST_BAD & CLUST32_MASK))
@@ -224,16 +355,24 @@ fat_set_fat32_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 	/* Truncate 'nextcl' value, if needed */
 	nextcl &= CLUST32_MASK;
 
-	p = fat_get_fat32_ptr(fat, cl);
+	p = fat_get_fat32_ptr(fat, cl, true);
 
 	le32enc(p, (uint32_t)nextcl);
 
 	return (0);
 }
 
+/*
+ * Generic accessor interface for FAT
+ */
 cl_t fat_get_cl_next(struct fat_descriptor *fat, cl_t cl)
 {
 	cl_t retval = CLUST_DEAD;
+
+	if (cl < CLUST_FIRST || cl >= fat->boot->NumClusters) {
+		pfatal("Invalid cluster: %ud", cl);
+		return CLUST_DEAD;
+	}
 
 	switch (fat->boot->ClustMask) {
 	case CLUST12_MASK:
@@ -256,6 +395,16 @@ int fat_set_cl_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 {
 	int retval = FSFATAL;
 
+	if (rdonly) {
+		pwarn(" (NO WRITE)\n");
+		return FSFATAL;
+	}
+
+	if (cl < CLUST_FIRST || cl >= fat->boot->NumClusters) {
+		pfatal("Invalid cluster: %ud", cl);
+		return FSFATAL;
+	}
+
 	switch (fat->boot->ClustMask) {
 	case CLUST12_MASK:
 		retval = fat_set_fat12_next(fat, cl, nextcl);
@@ -273,24 +422,13 @@ int fat_set_cl_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 	return (retval);
 }
 
+struct bootblock*
+fat_get_boot(struct fat_descriptor *fat) {
+
+	return(fat->boot);
+}
+
 /*
- * Find chain heads
- *
- * Traverse the whole FAT table and generate a bitmap.  Operation:
- *
- * 1. initialize the bitmap as all 1;
- * 2. traverse the whole FAT table.  For each fat_get_cl_next(),
- *    set the corresponding bit to 0 (because they are "next" cluster,
- *    they can't be the head cluster)
- *
- * We will have a bitmap for all clusters that are "head"s.  While scanning
- * directories, we know that the claimed used bitmap are already known, so
- * we flip the heads bitmap as needed, and finally we scan the chain heads
- * bitmap again and reclaim all 'heads' as lost+found.
- */
-
-
-/*-
  * The first 2 FAT entries contain pseudo-cluster numbers with the following
  * layout:
  *
@@ -372,61 +510,43 @@ err:
 }
 
 /*
- * Check a cluster number for valid value
- */
-static int
-checkclnum(struct bootblock *boot, u_int fat, cl_t cl, cl_t *next)
-{
-	if (*next >= (CLUST_RSRVD&boot->ClustMask))
-		*next |= ~boot->ClustMask;
-	if (*next == CLUST_FREE) {
-		boot->NumFree++;
-		return FSOK;
-	}
-	if (*next == CLUST_BAD) {
-		boot->NumBad++;
-		return FSOK;
-	}
-	if (*next < CLUST_FIRST
-	    || (*next >= boot->NumClusters && *next < CLUST_EOFS)) {
-		pwarn("Cluster %u in FAT %d continues with %s cluster number %u\n",
-		      cl, fat,
-		      *next < CLUST_RSRVD ? "out of range" : "reserved",
-		      *next&boot->ClustMask);
-		if (ask(0, "Truncate")) {
-			*next = CLUST_EOF;
-			return FSFATMOD;
-		}
-		return FSERROR;
-	}
-	return FSOK;
-}
-
-/*
  * Read a FAT from disk. Returns 1 if successful, 0 otherwise.
  */
 static int
-_readfat(int fs, struct bootblock *boot, u_int no, u_char **buffer)
+_readfat(int fs, struct bootblock *boot, u_char **buffer)
 {
 	off_t off;
+	size_t fatsize;
 
-	*buffer = calloc(boot->FATsecs, boot->bpbBytesPerSec);
+	fatsize = boot->FATsecs * boot->bpbBytesPerSec;
+
+	off = boot->bpbResSectors;
+	off *= boot->bpbBytesPerSec;
+
+	is_mmapped = false;
+
+	/* Attempt to mmap() first */
+	*buffer = mmap(NULL, fatsize, PROT_READ | (rdonly ? 0 : PROT_WRITE),
+	    MAP_SHARED, fs, off);
+	if (*buffer != MAP_FAILED) {
+		is_mmapped = true;
+		return 1;
+	}
+
+	/* mmap failed, create a buffer and read in the FAT table */
+	*buffer = malloc(fatsize);
 	if (*buffer == NULL) {
 		perr("No space for FAT sectors (%zu)",
 		    (size_t)boot->FATsecs);
 		return 0;
 	}
 
-	off = boot->bpbResSectors + no * boot->FATsecs;
-	off *= boot->bpbBytesPerSec;
-
 	if (lseek(fs, off, SEEK_SET) != off) {
 		perr("Unable to read FAT");
 		goto err;
 	}
 
-	if ((size_t)read(fs, *buffer, boot->FATsecs * boot->bpbBytesPerSec)
-	    != boot->FATsecs * boot->bpbBytesPerSec) {
+	if ((size_t)read(fs, *buffer,fatsize) != fatsize) {
 		perr("Unable to read FAT");
 		goto err;
 	}
@@ -438,36 +558,56 @@ _readfat(int fs, struct bootblock *boot, u_int no, u_char **buffer)
 	return 0;
 }
 
+static void
+releasefat(struct bootblock *boot, u_char **buffer)
+{
+	size_t fatsize;
+
+	if (is_mmapped) {
+		fatsize = boot->FATsecs * boot->bpbBytesPerSec;
+		munmap(*buffer, fatsize);
+	} else {
+		free(*buffer);
+	}
+	*buffer = NULL;
+}
+
 /*
- * Read a FAT and decode it into internal format
+ * Read or map a FAT and populate head bitmap
  */
 int
-readfat(int fs, struct bootblock *boot, u_int no, struct fatEntry **fp)
+readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 {
-	struct fatEntry *fat;
+	struct fat_descriptor *fat;
 	u_char *buffer, *p;
-	cl_t cl;
+	cl_t cl, nextcl;
 	int ret = FSOK;
 
 	boot->NumFree = boot->NumBad = 0;
 
-	if (!_readfat(fs, boot, no, &buffer))
+	if (!_readfat(fs, boot, &buffer))
 		return FSFATAL;
 
-	fat = calloc(boot->NumClusters, sizeof(struct fatEntry));
+	fat = calloc(1, sizeof(struct fat_descriptor));
 	if (fat == NULL) {
-		perr("No space for FAT clusters (%zu)",
-		    (size_t)boot->NumClusters);
-		free(buffer);
+		perr("No space for FAT descriptor");
+		releasefat(boot, &buffer);
 		return FSFATAL;
 	}
 
-	free(usedbitmap);
-	usedbitmap = calloc(1, roundup2(boot->NumClusters, LONG_BIT) / (LONG_BIT / 8));
-	if (usedbitmap == NULL) {
-		perr("No space for used map for FAT clusters (%zu)",
+	if (bitmap_ctor(&usedbitmap, boot->NumClusters, false) != FSOK) {
+		perr("No space for used bitmap for FAT clusters (%zu)",
 		    (size_t)boot->NumClusters);
-		free(buffer);
+		releasefat(boot, &buffer);
+		free(fat);
+		return FSFATAL;
+	}
+
+	if (bitmap_ctor(&headbitmap, boot->NumClusters, true) != FSOK) {
+		perr("No space for head bitmap for FAT clusters (%zu)",
+		    (size_t)boot->NumClusters);
+		bitmap_dtor(&usedbitmap);
+		releasefat(boot, &buffer);
 		free(fat);
 		return FSFATAL;
 	}
@@ -516,54 +656,71 @@ readfat(int fs, struct bootblock *boot, u_int no, struct fatEntry **fp)
 				break;
 			}
 
+			if (ask(1, "Correct")) {
+				p = buffer;
 
-			if (ask(1, "Correct"))
-				ret |= FSFIXFAT;
-		}
-	}
-	switch (boot->ClustMask) {
-	case CLUST32_MASK:
-		p = buffer + 8;
-		break;
-	case CLUST16_MASK:
-		p = buffer + 4;
-		break;
-	default:
-		p = buffer + 3;
-		break;
-	}
-	for (cl = CLUST_FIRST; cl < boot->NumClusters;) {
-		switch (boot->ClustMask) {
-		case CLUST32_MASK:
-			fat[cl].next = p[0] + (p[1] << 8)
-				       + (p[2] << 16) + (p[3] << 24);
-			fat[cl].next &= boot->ClustMask;
-			ret |= checkclnum(boot, no, cl, &fat[cl].next);
-			cl++;
-			p += 4;
-			break;
-		case CLUST16_MASK:
-			fat[cl].next = p[0] + (p[1] << 8);
-			ret |= checkclnum(boot, no, cl, &fat[cl].next);
-			cl++;
-			p += 2;
-			break;
-		default:
-			fat[cl].next = (p[0] + (p[1] << 8)) & 0x0fff;
-			ret |= checkclnum(boot, no, cl, &fat[cl].next);
-			cl++;
-			if (cl >= boot->NumClusters)
-				break;
-			fat[cl].next = ((p[1] >> 4) + (p[2] << 4)) & 0x0fff;
-			ret |= checkclnum(boot, no, cl, &fat[cl].next);
-			cl++;
-			p += 3;
-			break;
+				*p++ = (u_char)boot->bpbMedia;
+				*p++ = 0xff;
+				*p++ = 0xff;
+				switch (boot->ClustMask) {
+				case CLUST16_MASK:
+					*p++ = 0xff;
+					break;
+				case CLUST32_MASK:
+					*p++ = 0x0f;
+					*p++ = 0xff;
+					*p++ = 0xff;
+					*p++ = 0xff;
+					*p++ = 0x0f;
+					break;
+				default:
+					break;
+				}
+			}
 		}
 	}
 
-	free(buffer);
+	fat->fatbuf = buffer;
+	fat->boot = boot;
+
+	/* Traverse the FAT table and populate head map */
+	for (cl = CLUST_FIRST; cl < boot->NumClusters; cl++) {
+		nextcl = fat_get_cl_next(fat, cl);
+
+		/* Check if the next cluster number is valid */
+		if (nextcl == CLUST_FREE) {
+			fat_clear_cl_head(cl);
+			boot->NumFree++;
+		} else if (nextcl == CLUST_BAD) {
+			fat_clear_cl_head(cl);
+			boot->NumBad++;
+		} else if (nextcl < CLUST_FIRST ||
+		    (nextcl >= boot->NumClusters && nextcl < CLUST_EOFS)) {
+			pwarn("Cluster %u continues with %s "
+			    "cluster number %u\n",
+			    cl, (nextcl < CLUST_RSRVD) ?
+				"out of range" : "reserved",
+			    nextcl & boot->ClustMask);
+			if (ask(0, "Truncate")) {
+				fat_set_cl_next(fat, cl, CLUST_EOF);
+				ret |= FSFATMOD;
+			}
+		} else if (nextcl < boot->NumClusters) {
+			if (fat_is_cl_head(nextcl)) {
+				fat_clear_cl_head(nextcl);
+			} else {
+				/*
+				 * We know cl have crossed another
+				 * chain that we have already visited.
+				 * Ignore this for now.
+				 */
+			}
+		}
+
+	}
+
 	if (ret & FSFATAL) {
+		releasefat(boot, &buffer);
 		free(fat);
 		*fp = NULL;
 	} else
@@ -586,332 +743,97 @@ rsrvdcltype(cl_t cl)
 	return "bad";
 }
 
-static int
-clustdiffer(cl_t cl, cl_t *cp1, cl_t *cp2, u_int fatnum)
-{
-	if (*cp1 == CLUST_FREE || *cp1 >= CLUST_RSRVD) {
-		if (*cp2 == CLUST_FREE || *cp2 >= CLUST_RSRVD) {
-			if ((*cp1 != CLUST_FREE && *cp1 < CLUST_BAD
-			     && *cp2 != CLUST_FREE && *cp2 < CLUST_BAD)
-			    || (*cp1 > CLUST_BAD && *cp2 > CLUST_BAD)) {
-				pwarn("Cluster %u is marked %s with different indicators\n",
-				      cl, rsrvdcltype(*cp1));
-				if (ask(1, "Fix")) {
-					*cp2 = *cp1;
-					return FSFATMOD;
-				}
-				return FSFATAL;
-			}
-			pwarn("Cluster %u is marked %s in FAT 0, %s in FAT %u\n",
-			      cl, rsrvdcltype(*cp1), rsrvdcltype(*cp2), fatnum);
-			if (ask(0, "Use FAT 0's entry")) {
-				*cp2 = *cp1;
-				return FSFATMOD;
-			}
-			if (ask(0, "Use FAT %u's entry", fatnum)) {
-				*cp1 = *cp2;
-				return FSFATMOD;
-			}
-			return FSFATAL;
-		}
-		pwarn("Cluster %u is marked %s in FAT 0, but continues with cluster %u in FAT %d\n",
-		      cl, rsrvdcltype(*cp1), *cp2, fatnum);
-		if (ask(0, "Use continuation from FAT %u", fatnum)) {
-			*cp1 = *cp2;
-			return FSFATMOD;
-		}
-		if (ask(0, "Use mark from FAT 0")) {
-			*cp2 = *cp1;
-			return FSFATMOD;
-		}
-		return FSFATAL;
-	}
-	if (*cp2 == CLUST_FREE || *cp2 >= CLUST_RSRVD) {
-		pwarn("Cluster %u continues with cluster %u in FAT 0, but is marked %s in FAT %u\n",
-		      cl, *cp1, rsrvdcltype(*cp2), fatnum);
-		if (ask(0, "Use continuation from FAT 0")) {
-			*cp2 = *cp1;
-			return FSFATMOD;
-		}
-		if (ask(0, "Use mark from FAT %d", fatnum)) {
-			*cp1 = *cp2;
-			return FSFATMOD;
-		}
-		return FSERROR;
-	}
-	pwarn("Cluster %u continues with cluster %u in FAT 0, but with cluster %u in FAT %u\n",
-	      cl, *cp1, *cp2, fatnum);
-	if (ask(0, "Use continuation from FAT 0")) {
-		*cp2 = *cp1;
-		return FSFATMOD;
-	}
-	if (ask(0, "Use continuation from FAT %u", fatnum)) {
-		*cp1 = *cp2;
-		return FSFATMOD;
-	}
-	return FSERROR;
-}
-
 /*
- * Compare two FAT copies in memory. Resolve any conflicts and merge them
- * into the first one.
+ * Examine a cluster chain for errors
  */
 int
-comparefat(struct bootblock *boot, struct fatEntry *first,
-    struct fatEntry *second, u_int fatnum)
+checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 {
-	cl_t cl;
-	int ret = FSOK;
+	cl_t current_cl, next_cl;
+	struct bootblock *boot = fat_get_boot(fat);
 
-	for (cl = CLUST_FIRST; cl < boot->NumClusters; cl++)
-		if (first[cl].next != second[cl].next)
-			ret |= clustdiffer(cl, &first[cl].next, &second[cl].next, fatnum);
-	return ret;
-}
+	*chainsize = 0;
 
-void
-clearchain(struct bootblock *boot, struct fatEntry *fat, cl_t head)
-{
-	cl_t p, q;
-
-	for (p = head; p >= CLUST_FIRST && p < boot->NumClusters; p = q) {
-		if (fat[p].head != head)
+	current_cl = head;
+	for (current_cl = head; ; current_cl = next_cl) {
+		next_cl = fat_get_cl_next(fat, current_cl);
+		if (next_cl < CLUST_FIRST || next_cl > boot->NumClusters)
 			break;
-		q = fat[p].next;
-		fat[p].next = fat[p].head = CLUST_FREE;
-		fat[p].length = 0;
-	}
-}
-
-int
-tryclear(struct bootblock *boot, struct fatEntry *fat, cl_t head, cl_t *truncp)
-{
-	if (ask(0, "Clear chain starting at %u", head)) {
-		clearchain(boot, fat, head);
-		return FSFATMOD;
-	} else if (ask(0, "Truncate")) {
-		uint32_t len;
-		cl_t p;
-
-		for (p = head, len = 0;
-		    p >= CLUST_FIRST && p < boot->NumClusters;
-		    p = fat[p].next, len++)
-			continue;
-		*truncp = CLUST_EOF;
-		fat[head].length = len;
-		return FSFATMOD;
-	} else
-		return FSERROR;
-}
-
-/*
- * Check a complete FAT in-memory for crosslinks
- */
-int
-checkfat(struct bootblock *boot, struct fatEntry *fat)
-{
-	cl_t head, p, h, n;
-	u_int len;
-	int ret = 0;
-	int conf;
-
-	/*
-	 * pass 1: figure out the cluster chains.
-	 */
-	for (head = CLUST_FIRST; head < boot->NumClusters; head++) {
-		/* find next untravelled chain */
-		if (fat[head].head != 0		/* cluster already belongs to some chain */
-		    || fat[head].next == CLUST_FREE
-		    || fat[head].next == CLUST_BAD)
-			continue;		/* skip it. */
-
-		/* follow the chain and mark all clusters on the way */
-		for (len = 0, p = head;
-		     p >= CLUST_FIRST && p < boot->NumClusters &&
-		     fat[p].head != head;
-		     p = fat[p].next) {
-			fat[p].head = head;
-			len++;
-		}
-
-		/* the head record gets the length */
-		fat[head].length = fat[head].next == CLUST_FREE ? 0 : len;
-	}
-
-	/*
-	 * pass 2: check for crosslinked chains (we couldn't do this in pass 1 because
-	 * we didn't know the real start of the chain then - would have treated partial
-	 * chains as interlinked with their main chain)
-	 */
-	for (head = CLUST_FIRST; head < boot->NumClusters; head++) {
-		/* find next untravelled chain */
-		if (fat[head].head != head)
-			continue;
-
-		/* follow the chain to its end (hopefully) */
-		for (len = fat[head].length, p = head;
-		     (n = fat[p].next) >= CLUST_FIRST && n < boot->NumClusters;
-		     p = n)
-			if (fat[n].head != head || len-- < 2)
-				break;
-		if (n >= CLUST_EOFS)
-			continue;
-
-		if (n == CLUST_FREE || n >= CLUST_RSRVD) {
-			pwarn("Cluster chain starting at %u ends with cluster marked %s\n",
-			      head, rsrvdcltype(n));
-clear:
-			ret |= tryclear(boot, fat, head, &fat[p].next);
-			continue;
-		}
-		if (n < CLUST_FIRST || n >= boot->NumClusters) {
-			pwarn("Cluster chain starting at %u ends with cluster out of range (%u)\n",
-			    head, n);
-			goto clear;
-		}
-		if (head == fat[n].head) {
-			pwarn("Cluster chain starting at %u loops at cluster %u\n",
-			    head, p);
-			goto clear;
-		}
-		pwarn("Cluster chains starting at %u and %u are linked at cluster %u\n",
-		      head, fat[n].head, n);
-		conf = tryclear(boot, fat, head, &fat[p].next);
-		if (ask(0, "Clear chain starting at %u", h = fat[n].head)) {
-			if (conf == FSERROR) {
-				/*
-				 * Transfer the common chain to the one not cleared above.
-				 */
-				for (p = n;
-				     p >= CLUST_FIRST && p < boot->NumClusters;
-				     p = fat[p].next) {
-					if (h != fat[p].head) {
-						/*
-						 * Have to reexamine this chain.
-						 */
-						head--;
-						break;
-					}
-					fat[p].head = head;
-				}
+		if (fat_is_cl_used(next_cl)) {
+			/* We have seen this CL in somewhere else */
+			pwarn("Cluster %u crossed a chain at %u with %u\n",
+			    head, current_cl, next_cl);
+			if (ask(0, "Truncate")) {
+				fat_set_cl_next(fat, current_cl, CLUST_EOF);
+				return FSFATMOD;
+			} else {
+				return FSERROR;
 			}
-			clearchain(boot, fat, h);
-			conf |= FSFATMOD;
+
 		}
-		ret |= conf;
+		(*chainsize)++;
+		fat_set_cl_used(next_cl);
 	}
 
-	return ret;
+	/* A natural end */
+	if (next_cl > CLUST_EOFS) {
+		(*chainsize)++;
+		return FSOK;
+	}
+
+	pwarn("Cluster %u continues with %s cluster number %u\n",
+	    current_cl,
+	    next_cl < CLUST_RSRVD ? "out of range" : "reserved",
+	    next_cl & fat->boot->ClustMask);
+	if (ask(0, "Truncate")) {
+		fat_set_cl_next(fat, current_cl, CLUST_EOF);
+		return FSFATMOD;
+	} else {
+		return FSERROR;
+	}
 }
 
 /*
- * Write out FATs encoding them from the internal format
+ * Clear cluster chain from head.
+ */
+void
+clearchain(struct bootblock *boot, struct fat_descriptor *fat, cl_t head)
+{
+	cl_t current_cl, next_cl;
+
+	for (current_cl = head;
+	    current_cl >= CLUST_FIRST && current_cl < boot->NumClusters;
+	    current_cl = next_cl) {
+		next_cl = fat_get_cl_next(fat, current_cl);
+		fat_set_cl_next(fat, current_cl, CLUST_FREE);
+		if (fat_is_cl_used(current_cl)) {
+			fat_clear_cl_used(current_cl);
+		}
+	}
+}
+
+/*
+ * Write out FAT
  */
 int
-writefat(int fs, struct bootblock *boot, struct fatEntry *fat, int correct_fat)
+writefat(int fs, struct bootblock *boot, struct fat_descriptor *fat)
 {
-	u_char *buffer, *p;
-	cl_t cl;
 	u_int i;
 	size_t fatsz;
 	off_t off;
 	int ret = FSOK;
 
-	fatsz = boot->FATsecs * boot->bpbBytesPerSec;
-	buffer = calloc(boot->FATsecs, boot->bpbBytesPerSec);
-	if (buffer == NULL) {
-		perr("No space for FAT sectors (%zu)",
-		    (size_t)boot->FATsecs);
-		return FSFATAL;
-	}
-	boot->NumFree = 0;
-	p = buffer;
-	if (correct_fat) {
-		*p++ = (u_char)boot->bpbMedia;
-		*p++ = 0xff;
-		*p++ = 0xff;
-		switch (boot->ClustMask) {
-		case CLUST16_MASK:
-			*p++ = 0xff;
-			break;
-		case CLUST32_MASK:
-			*p++ = 0x0f;
-			*p++ = 0xff;
-			*p++ = 0xff;
-			*p++ = 0xff;
-			*p++ = 0x0f;
-			break;
-		}
-	} else {
-		/* use same FAT signature as the old FAT has */
-		int count;
-		u_char *old_fat;
-
-		switch (boot->ClustMask) {
-		case CLUST32_MASK:
-			count = 8;
-			break;
-		case CLUST16_MASK:
-			count = 4;
-			break;
-		default:
-			count = 3;
-			break;
-		}
-
-		if (!_readfat(fs, boot, boot->ValidFat >= 0 ? boot->ValidFat :0,
-					 &old_fat)) {
-			free(buffer);
-			return FSFATAL;
-		}
-
-		memcpy(p, old_fat, count);
-		free(old_fat);
-		p += count;
-	}
-
-	for (cl = CLUST_FIRST; cl < boot->NumClusters; cl++) {
-		switch (boot->ClustMask) {
-		case CLUST32_MASK:
-			if (fat[cl].next == CLUST_FREE)
-				boot->NumFree++;
-			*p++ = (u_char)fat[cl].next;
-			*p++ = (u_char)(fat[cl].next >> 8);
-			*p++ = (u_char)(fat[cl].next >> 16);
-			*p &= 0xf0;
-			*p++ |= (fat[cl].next >> 24)&0x0f;
-			break;
-		case CLUST16_MASK:
-			if (fat[cl].next == CLUST_FREE)
-				boot->NumFree++;
-			*p++ = (u_char)fat[cl].next;
-			*p++ = (u_char)(fat[cl].next >> 8);
-			break;
-		default:
-			if (fat[cl].next == CLUST_FREE)
-				boot->NumFree++;
-			*p++ = (u_char)fat[cl].next;
-			*p = (u_char)((fat[cl].next >> 8) & 0xf);
-			cl++;
-			if (cl >= boot->NumClusters)
-				break;
-			if (fat[cl].next == CLUST_FREE)
-				boot->NumFree++;
-			*p++ |= (u_char)(fat[cl].next << 4);
-			*p++ = (u_char)(fat[cl].next >> 4);
-			break;
-		}
-	}
-	for (i = 0; i < boot->bpbFATs; i++) {
+	fatsz = fat->fatsize;
+	for (i = is_mmapped ? 1 : 0; i < boot->bpbFATs; i++) {
 		off = boot->bpbResSectors + i * boot->FATsecs;
 		off *= boot->bpbBytesPerSec;
 		if (lseek(fs, off, SEEK_SET) != off
-		    || (size_t)write(fs, buffer, fatsz) != fatsz) {
+		    || (size_t)write(fs, fat->fatbuf, fatsz) != fatsz) {
 			perr("Unable to write FAT");
 			ret = FSFATAL; /* Return immediately?		XXX */
 		}
 	}
-	free(buffer);
+
 	return ret;
 }
 
@@ -919,31 +841,54 @@ writefat(int fs, struct bootblock *boot, struct fatEntry *fat, int correct_fat)
  * Check a complete in-memory FAT for lost cluster chains
  */
 int
-checklost(int dosfs, struct bootblock *boot, struct fatEntry *fat)
+checklost(int dosfs, struct bootblock *boot, struct fat_descriptor *fat)
 {
 	cl_t head;
 	int mod = FSOK;
 	int ret;
+	size_t chains, chainlength;
 
-	for (head = CLUST_FIRST; head < boot->NumClusters; head++) {
-		/* find next untravelled chain */
-		if (fat[head].head != head
-		    || fat[head].next == CLUST_FREE
-		    || (fat[head].next >= CLUST_RSRVD
-			&& fat[head].next < CLUST_EOFS)
-		    || (fat_get_cl_used(head)))
+	/*
+	 * At this point, we have already traversed all directories.
+	 * All remaining chain heads in the bitmap are heads of lost
+	 * chains.
+	 */
+	chains = fat_get_head_count();
+	for (head = CLUST_FIRST;
+	    chains > 0 && head < boot->NumClusters;
+	    head++) {
+		/*
+		 * We expect the bitmap to be very sparse, so skip if
+		 * the range is full of 0's
+		 */
+		if (head % LONG_BIT == 0 && fat_is_cl_head_in_range(head)) {
+			head += LONG_BIT;
+			if (chains >= LONG_BIT) {
+				chains -= LONG_BIT;
+			} else {
+				chains = 0;
+			}
 			continue;
-
-		pwarn("Lost cluster chain at cluster %u\n%d Cluster(s) lost\n",
-		      head, fat[head].length);
-		mod |= ret = reconnect(dosfs, boot, fat, head);
-		if (mod & FSFATAL)
-			break;
-		if (ret == FSERROR && ask(0, "Clear")) {
-			clearchain(boot, fat, head);
-			mod |= FSFATMOD;
 		}
+		if (fat_is_cl_head(head)) {
+			ret = checkchain(fat, head, &chainlength);
+			if (ret != FSERROR) {
+				pwarn("Lost cluster chain at cluster %u\n"
+				    "%zd Cluster(s) lost\n",
+				    head, chainlength);
+				mod |= ret = reconnect(dosfs, fat, head,
+				    chainlength);
+			}
+			if (mod & FSFATAL)
+				break;
+			if (ret == FSERROR && ask(0, "Clear")) {
+				clearchain(boot, fat, head);
+				mod |= FSFATMOD;
+			}
+		}
+		chains--;
 	}
+
 	finishlf();
 
 	if (boot->bpbFSInfo) {
@@ -959,13 +904,13 @@ checklost(int dosfs, struct bootblock *boot, struct fatEntry *fat)
 		}
 		if (boot->FSNext != 0xffffffffU &&
 		    (boot->FSNext >= boot->NumClusters ||
-		    (boot->NumFree && fat[boot->FSNext].next != CLUST_FREE))) {
+		    (boot->NumFree && fat_get_cl_next(fat, boot->FSNext) != CLUST_FREE))) {
 			pwarn("Next free cluster in FSInfo block (%u) %s\n",
 			      boot->FSNext,
 			      (boot->FSNext >= boot->NumClusters) ? "invalid" : "not free");
 			if (ask(1, "fix"))
 				for (head = CLUST_FIRST; head < boot->NumClusters; head++)
-					if (fat[head].next == CLUST_FREE) {
+					if (fat_get_cl_next(fat, head) == CLUST_FREE) {
 						boot->FSNext = head;
 						ret = 1;
 						break;
@@ -975,7 +920,6 @@ checklost(int dosfs, struct bootblock *boot, struct fatEntry *fat)
 			mod |= writefsinfo(dosfs, boot);
 	}
 
-	free(usedbitmap);
-	usedbitmap = NULL;
+	bitmap_dtor(&usedbitmap);
 	return mod;
 }
