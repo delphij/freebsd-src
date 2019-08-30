@@ -255,6 +255,23 @@ int fat_set_cl_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 	return (retval);
 }
 
+/*
+ * Find chain heads
+ *
+ * Traverse the whole FAT table and generate a bitmap.  Operation:
+ *
+ * 1. initialize the bitmap as all 1;
+ * 2. traverse the whole FAT table.  For each fat_get_cl_next(),
+ *    set the corresponding bit to 0 (because they are "next" cluster,
+ *    they can't be the head cluster)
+ *
+ * We will have a bitmap for all clusters that are "head"s.  While scanning
+ * directories, we know that the claimed used bitmap are already known, so
+ * we flip the heads bitmap as needed, and finally we scan the chain heads
+ * bitmap again and reclaim all 'heads' as lost+found.
+ */
+
+
 /*-
  * The first 2 FAT entries contain pseudo-cluster numbers with the following
  * layout:
