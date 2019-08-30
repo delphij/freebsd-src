@@ -97,13 +97,19 @@ struct fat_descriptor {
  *
  * FAT12s are sufficiently small, expect it to always fit in the RAM.
  */
+static uint8_t *
+fat_get_fat12_ptr(struct fat_descriptor *fat, cl_t cl)
+{
+	return (fat->fatbuf + ((cl + (cl >> 1));
+}
+
 static cl_t
 fat_get_fat12_next(struct fat_descriptor *fat, cl_t cl)
 {
 	const uint8_t	*p;
 	cl_t	retval;
 
-	p = fat->fatbuf + (cl + (cl >> 1));
+	p = fat_get_fat12_ptr(fat, cl);
 	retval = le16dec(p);
 	/* Odd cluster: lower 4 bits belongs to the subsequent cluster */
 	if ((cl & 1) == 1)
@@ -124,7 +130,7 @@ fat_set_fat12_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 	/* Truncate 'nextcl' value, if needed */
 	nextcl &= CLUST12_MASK;
 
-	p = fat->fatbuf + (cl + (cl >> 1));
+	p = fat_get_fat12_ptr(fat, cl);
 
 	/*
 	 * Read in the 4 bits from the subsequent (for even clusters)
@@ -148,13 +154,19 @@ fat_set_fat12_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
  *
  * FAT16s are sufficiently small, expect it to always fit in the RAM.
  */
+static uint8_t *
+fat_get_fat16_ptr(struct fat_descriptor *fat, cl_t cl)
+{
+	return (fat->fatbuf + (cl << 1));
+}
+
 static cl_t
 fat_get_fat16_next(struct fat_descriptor *fat, cl_t cl)
 {
 	const uint8_t	*p;
 	cl_t	retval;
 
-	p = fat->fatbuf + (cl << 1);
+	p = fat_get_fat16_ptr(fat, cl);
 	retval = le16dec(p) & CLUST16_MASK;
 
 	if (retval >= (CLUST_BAD & CLUST16_MASK))
@@ -171,7 +183,7 @@ fat_set_fat16_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 	/* Truncate 'nextcl' value, if needed */
 	nextcl &= CLUST16_MASK;
 
-	p = fat->fatbuf + (cl << 1);
+	p = fat_get_fat16_ptr(fat, cl);
 
 	le16enc(p, (uint16_t)nextcl);
 
@@ -183,13 +195,19 @@ fat_set_fat16_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
  *
  * TODO(delphij): paging/mmap support
  */
+static uint8_t *
+fat_get_fat32_ptr(struct fat_descriptor *fat, cl_t cl)
+{
+	return (fat->fatbuf + (cl << 2););
+}
+
 static cl_t
 fat_get_fat32_next(struct fat_descriptor *fat, cl_t cl)
 {
 	const uint8_t	*p;
 	cl_t	retval;
 
-	p = fat->fatbuf + (cl << 2);
+	p = fat_get_fat32_ptr(fat, cl);
 	retval = le32dec(p) & CLUST32_MASK;
 
 	if (retval >= (CLUST_BAD & CLUST32_MASK))
@@ -206,7 +224,7 @@ fat_set_fat32_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 	/* Truncate 'nextcl' value, if needed */
 	nextcl &= CLUST32_MASK;
 
-	p = fat->fatbuf + (cl << 2);
+	p = fat_get_fat32_ptr(fat, cl);
 
 	le32enc(p, (uint32_t)nextcl);
 
