@@ -835,6 +835,7 @@ readDosDirSection(int f, struct bootblock *boot, struct fat_descriptor *fat,
 							if (boot->ClustMask == CLUST32_MASK)
 								p[20] = p[21] = 0;
 							dirent.size = 0;
+							dirent.head = 0;
 							mod |= THISMOD|FSDIRMOD;
 						} else
 							mod |= FSERROR;
