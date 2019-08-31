@@ -116,7 +116,6 @@ struct dosDirEntry {
 	uint flags;			/* attributes */
 	cl_t head;			/* cluster no */
 	u_int32_t size;			/* filesize in bytes */
-	u_int32_t psize;		/* physical size in bytes */
 	uint fsckflags;			/* flags during fsck */
 };
 /* Flags in fsckflags: */
