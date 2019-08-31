@@ -132,7 +132,7 @@ bitmap_get(long_bitmap_t *lbp, cl_t cl)
 }
 
 static inline bool
-bitmap_any_in_range(long_bitmap_t *lbp, cl_t cl)
+bitmap_none_in_range(long_bitmap_t *lbp, cl_t cl)
 {
 	cl_t i = cl / LONG_BIT;
 
@@ -204,7 +204,7 @@ fat_is_cl_head(cl_t cl)
 static inline bool
 fat_is_cl_head_in_range(cl_t cl)
 {
-	return (bitmap_any_in_range(&headbitmap, cl));
+	return (!(bitmap_none_in_range(&headbitmap, cl)));
 }
 
 static size_t
@@ -689,10 +689,14 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 
 		/* Check if the next cluster number is valid */
 		if (nextcl == CLUST_FREE) {
-			fat_clear_cl_head(cl);
+			if (fat_is_cl_head(cl)) {
+				fat_clear_cl_head(cl);
+			}
 			boot->NumFree++;
 		} else if (nextcl == CLUST_BAD) {
-			fat_clear_cl_head(cl);
+			if (fat_is_cl_head(cl)) {
+				fat_clear_cl_head(cl);
+			}
 			boot->NumBad++;
 		} else if (nextcl < CLUST_FIRST ||
 		    (nextcl >= boot->NumClusters && nextcl < CLUST_EOFS)) {
@@ -787,6 +791,7 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 	    next_cl & fat->boot->ClustMask);
 	if (ask(0, "Truncate")) {
 		fat_set_cl_next(fat, current_cl, CLUST_EOF);
+		(*chainsize)++;
 		return FSFATMOD;
 	} else {
 		return FSERROR;
@@ -856,18 +861,13 @@ checklost(int dosfs, struct bootblock *boot, struct fat_descriptor *fat)
 	chains = fat_get_head_count();
 	for (head = CLUST_FIRST;
 	    chains > 0 && head < boot->NumClusters;
-	    head++) {
+	    ) {
 		/*
 		 * We expect the bitmap to be very sparse, so skip if
 		 * the range is full of 0's
 		 */
-		if (head % LONG_BIT == 0 && fat_is_cl_head_in_range(head)) {
+		if (head % LONG_BIT == 0 && !fat_is_cl_head_in_range(head)) {
 			head += LONG_BIT;
-			if (chains >= LONG_BIT) {
-				chains -= LONG_BIT;
-			} else {
-				chains = 0;
-			}
 			continue;
 		}
 		if (fat_is_cl_head(head)) {
@@ -885,8 +885,9 @@ checklost(int dosfs, struct bootblock *boot, struct fat_descriptor *fat)
 				clearchain(boot, fat, head);
 				mod |= FSFATMOD;
 			}
+			chains--;
 		}
-		chains--;
+		head++;
 	}
 
 	finishlf();
