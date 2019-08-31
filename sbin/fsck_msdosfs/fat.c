@@ -811,6 +811,7 @@ clearchain(struct bootblock *boot, struct fat_descriptor *fat, cl_t head)
 	    current_cl = next_cl) {
 		next_cl = fat_get_cl_next(fat, current_cl);
 		fat_set_cl_next(fat, current_cl, CLUST_FREE);
+		boot->NumFree++;
 		if (fat_is_cl_used(current_cl)) {
 			fat_clear_cl_used(current_cl);
 		}
