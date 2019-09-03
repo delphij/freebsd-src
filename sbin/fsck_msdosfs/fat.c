@@ -748,7 +748,22 @@ rsrvdcltype(cl_t cl)
 }
 
 /*
- * Examine a cluster chain for errors
+ * Offer to truncate a chain at the specified CL.
+ */
+static inline int
+truncate_at(struct fat_descriptor *fat, cl_t current_cl, size_t *chainsize)
+{
+	if (ask(0, "Truncate")) {
+		fat_set_cl_next(fat, current_cl, CLUST_EOF);
+		(*chainsize)++;
+		return FSFATMOD;
+	} else {
+		return FSERROR;
+	}
+}
+
+/*
+ * Examine a cluster chain for errors and count its size
  */
 int
 checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
@@ -756,8 +771,24 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 	cl_t current_cl, next_cl;
 	struct bootblock *boot = fat_get_boot(fat);
 
-	*chainsize = 0;
+	assert(fat_is_cl_head(head));
+	assert(head >= CLUST_FIRST && head < boot->NumClusters);
 
+	/*
+	 * The allocation of a non-zero sized file or directory is
+	 * represented as a singly linked list, and the tail node
+	 * would be the EOF marker (>=CLUST_EOFS).
+	 *
+	 * With a valid head node at hand, we expect all subsequent
+	 * cluster to be either a not yet seen and valid cluster (we
+	 * would continue counting), or the EOF marker (we conclude
+	 * the scan of this chain).
+	 *
+	 * For all other cases, the chain is invalid, and the only
+	 * fix would be to truncate at the current node (mark it
+	 * as EOF)
+	 */
+	*chainsize = 0;
 	current_cl = head;
 	for (current_cl = head; ; current_cl = next_cl) {
 		next_cl = fat_get_cl_next(fat, current_cl);
@@ -767,35 +798,25 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 			/* We have seen this CL in somewhere else */
 			pwarn("Cluster %u crossed a chain at %u with %u\n",
 			    head, current_cl, next_cl);
-			if (ask(0, "Truncate")) {
-				fat_set_cl_next(fat, current_cl, CLUST_EOF);
-				return FSFATMOD;
-			} else {
-				return FSERROR;
-			}
-
+			return (truncate_at(fat, current_cl, chainsize);
+		} else {
+			fat_set_cl_used(next_cl);
+			(*chainsize)++;
 		}
-		(*chainsize)++;
-		fat_set_cl_used(next_cl);
 	}
 
 	/* A natural end */
-	if (next_cl > CLUST_EOFS) {
+	if (next_cl >= CLUST_EOFS) {
 		(*chainsize)++;
 		return FSOK;
 	}
 
+	/* The chain ended with an out-of-range cluster number. */
 	pwarn("Cluster %u continues with %s cluster number %u\n",
 	    current_cl,
 	    next_cl < CLUST_RSRVD ? "out of range" : "reserved",
 	    next_cl & fat->boot->ClustMask);
-	if (ask(0, "Truncate")) {
-		fat_set_cl_next(fat, current_cl, CLUST_EOF);
-		(*chainsize)++;
-		return FSFATMOD;
-	} else {
-		return FSERROR;
-	}
+	return (truncate_at(fat, current_cl, chainsize);
 }
 
 /*
