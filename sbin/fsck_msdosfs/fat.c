@@ -798,7 +798,7 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 			/* We have seen this CL in somewhere else */
 			pwarn("Cluster %u crossed a chain at %u with %u\n",
 			    head, current_cl, next_cl);
-			return (truncate_at(fat, current_cl, chainsize);
+			return (truncate_at(fat, current_cl, chainsize));
 		} else {
 			fat_set_cl_used(next_cl);
 			(*chainsize)++;
@@ -816,7 +816,7 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 	    current_cl,
 	    next_cl < CLUST_RSRVD ? "out of range" : "reserved",
 	    next_cl & fat->boot->ClustMask);
-	return (truncate_at(fat, current_cl, chainsize);
+	return (truncate_at(fat, current_cl, chainsize));
 }
 
 /*
