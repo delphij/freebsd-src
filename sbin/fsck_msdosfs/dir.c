@@ -96,14 +96,11 @@ static struct dirTodoNode *newDirTodo(void);
 static void freeDirTodo(struct dirTodoNode *);
 static char *fullpath(struct dosDirEntry *);
 static u_char calcShortSum(u_char *);
-static int delete(int, struct bootblock *, struct fat_descriptor *, cl_t, int,
-    cl_t, int, int);
-static int removede(int, struct bootblock *, struct fat_descriptor *, u_char *,
-    u_char *, cl_t, cl_t, cl_t, char *, int);
-static int checksize(struct bootblock *, struct fat_descriptor *, u_char *,
-    struct dosDirEntry *);
-static int readDosDirSection(int, struct bootblock *, struct fat_descriptor *,
-    struct dosDirEntry *);
+static int delete(int, struct fat_descriptor *, cl_t, int, cl_t, int, int);
+static int removede(int, struct fat_descriptor *, u_char *, u_char *,
+    cl_t, cl_t, cl_t, char *, int);
+static int checksize(struct fat_descriptor *, u_char *, struct dosDirEntry *);
+static int readDosDirSection(int, struct fat_descriptor *, struct dosDirEntry *);
 
 /*
  * Manage free dosDirEntry structures.
@@ -311,12 +308,16 @@ finishDosDirSection(void)
  * Delete directory entries between startcl, startoff and endcl, endoff.
  */
 static int
-delete(int f, struct bootblock *boot, struct fat_descriptor *fat, cl_t startcl,
+delete(int f, struct fat_descriptor *fat, cl_t startcl,
     int startoff, cl_t endcl, int endoff, int notlast)
 {
 	u_char *s, *e;
 	off_t off;
-	int clsz = boot->bpbSecPerClust * boot->bpbBytesPerSec;
+	int clsz;
+	struct bootblock *boot;
+
+	boot = fat_get_boot(fat);
+	clsz = boot->bpbSecPerClust * boot->bpbBytesPerSec;
 
 	s = delbuf + startoff;
 	e = delbuf + clsz;
@@ -358,8 +359,8 @@ delete(int f, struct bootblock *boot, struct fat_descriptor *fat, cl_t startcl,
 }
 
 static int
-removede(int f, struct bootblock *boot, struct fat_descriptor *fat,
-    u_char *start, u_char *end, cl_t startcl, cl_t endcl, cl_t curcl,
+removede(int f, struct fat_descriptor *fat, u_char *start,
+    u_char *end, cl_t startcl, cl_t endcl, cl_t curcl,
     char *path, int type)
 {
 	switch (type) {
@@ -376,7 +377,7 @@ removede(int f, struct bootblock *boot, struct fat_descriptor *fat,
 	}
 	if (ask(0, "Remove")) {
 		if (startcl != curcl) {
-			if (delete(f, boot, fat,
+			if (delete(f, fat,
 				   startcl, start - buffer,
 				   endcl, end - buffer,
 				   endcl == curcl) == FSFATAL)
@@ -396,10 +397,12 @@ removede(int f, struct bootblock *boot, struct fat_descriptor *fat,
  * Check an in-memory file entry
  */
 static int
-checksize(struct bootblock *boot, struct fat_descriptor *fat, u_char *p,
-    struct dosDirEntry *dir)
+checksize(struct fat_descriptor *fat, u_char *p, struct dosDirEntry *dir)
 {
 	int ret = FSOK;
+	struct bootblock *boot;
+
+	boot = fat_get_boot(fat);
 
 	/*
 	 * Check size on ordinary files
@@ -521,9 +524,9 @@ check_subdirectory(int f, struct bootblock *boot, struct dosDirEntry *dir)
  *   - push directories onto the todo-stack
  */
 static int
-readDosDirSection(int f, struct bootblock *boot, struct fat_descriptor *fat,
-    struct dosDirEntry *dir)
+readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 {
+	struct bootblock *boot;
 	struct dosDirEntry dirent, *d;
 	u_char *p, *vallfn, *invlfn, *empty;
 	off_t off;
@@ -534,6 +537,8 @@ readDosDirSection(int f, struct bootblock *boot, struct fat_descriptor *fat,
 	int shortSum;
 	int mod = FSOK;
 #define	THISMOD	0x8000			/* Only used within this routine */
+
+	boot = fat_get_boot(fat);
 
 	cl = dir->head;
 	if (dir->parent && (cl < CLUST_FIRST || cl >= boot->NumClusters)) {
@@ -584,7 +589,7 @@ readDosDirSection(int f, struct bootblock *boot, struct fat_descriptor *fat,
 						u_char *q;
 
 						dir->fsckflags &= ~DIREMPTY;
-						if (delete(f, boot, fat,
+						if (delete(f, fat,
 							   empcl, empty - buffer,
 							   cl, p - buffer, 1) == FSFATAL)
 							return FSFATAL;
@@ -713,7 +718,7 @@ readDosDirSection(int f, struct bootblock *boot, struct fat_descriptor *fat,
 
 			if (dirent.flags & ATTR_VOLUME) {
 				if (vallfn || invlfn) {
-					mod |= removede(f, boot, fat,
+					mod |= removede(f, fat,
 							invlfn ? invlfn : vallfn, p,
 							invlfn ? invcl : valcl, -1, 0,
 							fullpath(dir), 2);
@@ -753,7 +758,7 @@ readDosDirSection(int f, struct bootblock *boot, struct fat_descriptor *fat,
 			dirent.next = dir->child;
 
 			if (invlfn) {
-				mod |= k = removede(f, boot, fat,
+				mod |= k = removede(f, fat,
 						    invlfn, vallfn ? vallfn : p,
 						    invcl, vallfn ? valcl : cl, cl,
 						    fullpath(&dirent), 0);
@@ -974,7 +979,7 @@ readDosDirSection(int f, struct bootblock *boot, struct fat_descriptor *fat,
 				n->dir = d;
 				pendingDirectories = n;
 			} else {
-				mod |= k = checksize(boot, fat, p, &dirent);
+				mod |= k = checksize(fat, p, &dirent);
 				if (k & FSDIRMOD)
 					mod |= THISMOD;
 			}
@@ -995,7 +1000,7 @@ readDosDirSection(int f, struct bootblock *boot, struct fat_descriptor *fat,
 		}
 	} while ((cl = fat_get_cl_next(fat, cl)) >= CLUST_FIRST && cl < boot->NumClusters);
 	if (invlfn || vallfn)
-		mod |= removede(f, boot, fat,
+		mod |= removede(f, fat,
 				invlfn ? invlfn : vallfn, p,
 				invlfn ? invcl : valcl, -1, 0,
 				fullpath(dir), 1);
@@ -1016,11 +1021,11 @@ readDosDirSection(int f, struct bootblock *boot, struct fat_descriptor *fat,
 }
 
 int
-handleDirTree(int dosfs, struct bootblock *boot, struct fat_descriptor *fat)
+handleDirTree(int dosfs, struct fat_descriptor *fat)
 {
 	int mod;
 
-	mod = readDosDirSection(dosfs, boot, fat, rootDir);
+	mod = readDosDirSection(dosfs, fat, rootDir);
 	if (mod & FSFATAL)
 		return FSFATAL;
 
@@ -1041,7 +1046,7 @@ handleDirTree(int dosfs, struct bootblock *boot, struct fat_descriptor *fat)
 		/*
 		 * handle subdirectory
 		 */
-		mod |= readDosDirSection(dosfs, boot, fat, dir);
+		mod |= readDosDirSection(dosfs, fat, dir);
 		if (mod & FSFATAL)
 			return FSFATAL;
 	}
