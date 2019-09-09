@@ -393,6 +393,7 @@ static int
 checksize(struct fat_descriptor *fat, u_char *p, struct dosDirEntry *dir)
 {
 	int ret = FSOK;
+	size_t physicalSize;
 	struct bootblock *boot;
 
 	boot = fat_get_boot(fat);
@@ -400,11 +401,9 @@ checksize(struct fat_descriptor *fat, u_char *p, struct dosDirEntry *dir)
 	/*
 	 * Check size on ordinary files
 	 */
-	size_t physicalSize;
-
-	if (dir->head == CLUST_FREE)
+	if (dir->head == CLUST_FREE) {
 		physicalSize = 0;
-	else {
+	} else {
 		if (dir->head < CLUST_FIRST || dir->head >= boot->NumClusters)
 			return FSERROR;
 		ret |= checkchain(fat, dir->head, &physicalSize);
@@ -548,7 +547,6 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 	 */
 	if (dir->parent != 0 || (boot->flags & FAT32)) {
 		mod |= checkchain(fat, dir->head, &dirclusters);
-		fat_clear_cl_head(dir->head);
 	}
 
 	do {
@@ -979,11 +977,6 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 				mod |= k = checksize(fat, p, &dirent);
 				if (k & FSDIRMOD)
 					mod |= THISMOD;
-				/*
-				 * We have seen this directory entry,
-				 * note it.
-				 */
-				fat_clear_cl_head(dirent.head);
 			}
 			boot->NumFiles++;
 		}
