@@ -261,14 +261,7 @@ resetDosDirSection(struct fat_descriptor *fat)
 			pfatal("Root directory doesn't start a cluster chain");
 			return FSFATAL;
 		}
-		/*
-		 * Mark the chain head as used, and remove it
-		 * from head bitmap because it's claimed by the
-		 * root directory.
-		 */
-		fat_set_cl_used(boot->bpbRootClust);
 		rootDir->head = boot->bpbRootClust;
-		fat_clear_cl_head(boot->bpbRootClust);
 	}
 
 	return ret;
@@ -536,6 +529,7 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 	u_int lidx = 0;
 	int shortSum;
 	int mod = FSOK;
+	size_t dirclusters;
 #define	THISMOD	0x8000			/* Only used within this routine */
 
 	boot = fat_get_boot(fat);
@@ -549,6 +543,14 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 	}
 	shortSum = -1;
 	vallfn = invlfn = empty = NULL;
+	/*
+	 * Make sure we have a sane chain; mark the head as seen.
+	 */
+	if (dir->parent != 0 || (boot->flags & FAT32)) {
+		mod |= checkchain(fat, dir->head, &dirclusters);
+		fat_clear_cl_head(dir->head);
+	}
+
 	do {
 		if (!(boot->flags & FAT32) && !dir->parent) {
 			last = boot->bpbRootDirEnts * 32;
@@ -854,11 +856,6 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 							mod |= FSERROR;
 					}
 				}
-
-				if (dirent.head >= CLUST_FIRST && dirent.head < boot->NumClusters) {
-					fat_set_cl_used(dirent.head);
-					fat_clear_cl_head(dirent.head);
-				}
 			}
 			if (dirent.flags & ATTR_DIRECTORY) {
 				/*
@@ -982,6 +979,11 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 				mod |= k = checksize(fat, p, &dirent);
 				if (k & FSDIRMOD)
 					mod |= THISMOD;
+				/*
+				 * We have seen this directory entry,
+				 * note it.
+				 */
+				fat_clear_cl_head(dirent.head);
 			}
 			boot->NumFiles++;
 		}
