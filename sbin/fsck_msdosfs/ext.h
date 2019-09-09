@@ -113,11 +113,6 @@ struct bootblock* fat_get_boot(struct fat_descriptor *);
 int readfat(int, struct bootblock *, struct fat_descriptor **);
 
 /*
- * Check a FAT
- */
-int checkfat(struct bootblock *, struct fat_descriptor *);
-
-/*
  * Write back FAT entries
  */
 int writefat(int, struct bootblock *, struct fat_descriptor *);
