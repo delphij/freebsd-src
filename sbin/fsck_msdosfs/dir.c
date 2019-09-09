@@ -222,11 +222,14 @@ static struct dosDirEntry *lostDir;
  * Init internal state for a new directory scan.
  */
 int
-resetDosDirSection(struct bootblock *boot, struct fat_descriptor *fat __unused)
+resetDosDirSection(struct fat_descriptor *fat)
 {
 	int b1, b2;
 	int ret = FSOK;
 	size_t len;
+	struct bootblock *boot;
+
+	boot = fat_get_boot(fat);
 
 	b1 = boot->bpbRootDirEnts * 32;
 	b2 = boot->bpbSecPerClust * boot->bpbBytesPerSec;
