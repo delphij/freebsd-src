@@ -119,7 +119,7 @@ checkfilesys(const char *fname)
 	/* now write the FATs */
 	if (mod & (FSFATMOD|FSFIXFAT)) {
 		if (ask(1, "Update FATs")) {
-			mod |= writefat(dosfs, &boot, fat);
+			mod |= writefat(dosfs, fat);
 			if (mod & FSFATAL)
 				goto out;
 		} else
@@ -143,7 +143,7 @@ checkfilesys(const char *fname)
 
 			if (mod & FSDIRTY) {
 				pwarn("MARKING FILE SYSTEM CLEAN\n");
-				mod |= writefat(dosfs, &boot, fat);
+				mod |= writefat(dosfs, fat);
 			} else {
 				pwarn("\n***** FILE SYSTEM IS LEFT MARKED AS DIRTY *****\n");
 				mod |= FSERROR; /* file system not clean */
