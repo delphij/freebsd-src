@@ -127,7 +127,7 @@ int writefat(int, struct bootblock *, struct fat_descriptor *);
  */
 int resetDosDirSection(struct fat_descriptor *);
 void finishDosDirSection(void);
-int handleDirTree(int, struct bootblock *, struct fat_descriptor *);
+int handleDirTree(int, struct fat_descriptor *);
 
 /*
  * Cross-check routines run after everything is completely in memory

@@ -105,7 +105,7 @@ checkfilesys(const char *fname)
 		goto out;
 	/* delay writing FATs */
 
-	mod |= handleDirTree(dosfs, &boot, fat);
+	mod |= handleDirTree(dosfs, fat);
 	if (mod & FSFATAL)
 		goto out;
 
