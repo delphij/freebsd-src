@@ -775,6 +775,7 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 	assert(head >= CLUST_FIRST && head < boot->NumClusters);
 
 	fat_set_cl_used(head);
+	fat_clear_cl_head(head);
 
 	/*
 	 * The allocation of a non-zero sized file or directory is
