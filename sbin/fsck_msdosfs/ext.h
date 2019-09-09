@@ -125,7 +125,7 @@ int writefat(int, struct bootblock *, struct fat_descriptor *);
 /*
  * Read a directory
  */
-int resetDosDirSection(struct bootblock *, struct fat_descriptor *);
+int resetDosDirSection(struct fat_descriptor *);
 void finishDosDirSection(void);
 int handleDirTree(int, struct bootblock *, struct fat_descriptor *);
 

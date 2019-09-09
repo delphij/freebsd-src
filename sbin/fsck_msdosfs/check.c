@@ -99,7 +99,7 @@ checkfilesys(const char *fname)
 	if (!preen)
 		printf("** Phase 2 - Checking Directories\n");
 
-	mod |= resetDosDirSection(&boot, fat);
+	mod |= resetDosDirSection(fat);
 	finish_dosdirsection = 1;
 	if (mod & FSFATAL)
 		goto out;
