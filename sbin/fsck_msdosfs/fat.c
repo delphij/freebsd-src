@@ -843,12 +843,15 @@ clearchain(struct bootblock *boot, struct fat_descriptor *fat, cl_t head)
  * Write out FAT
  */
 int
-writefat(int fs, struct bootblock *boot, struct fat_descriptor *fat)
+writefat(int fs, struct fat_descriptor *fat)
 {
 	u_int i;
 	size_t fatsz;
 	off_t off;
 	int ret = FSOK;
+	struct bootblock *boot;
+
+	boot = fat_get_boot(fat);
 
 	fatsz = fat->fatsize;
 	for (i = is_mmapped ? 1 : 0; i < boot->bpbFATs; i++) {
