@@ -422,10 +422,27 @@ int fat_set_cl_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 	return (retval);
 }
 
+static inline struct bootblock*
+fat_get_boot_(struct fat_descriptor *fat) {
+
+	return (fat->boot);
+}
+
 struct bootblock*
 fat_get_boot(struct fat_descriptor *fat) {
 
-	return(fat->boot);
+	return (fat_get_boot_(fat));
+}
+
+/*
+ * Whether a cl is in valid data range.
+ */
+static inline bool
+fat_is_cl_valid(struct fat_descriptor *fat, cl_t cl)
+{
+	const struct bootblock *boot = fat_get_boot_(fat);
+
+	return (cl >= CLUST_FIRST && cl < boot->NumClusters);
 }
 
 /*
@@ -748,7 +765,7 @@ rsrvdcltype(cl_t cl)
 }
 
 /*
- * Offer to truncate a chain at the specified CL.
+ * Offer to truncate a chain at the specified CL, called by checkchain().
  */
 static inline int
 truncate_at(struct fat_descriptor *fat, cl_t current_cl, size_t *chainsize)
@@ -763,19 +780,30 @@ truncate_at(struct fat_descriptor *fat, cl_t current_cl, size_t *chainsize)
 }
 
 /*
- * Examine a cluster chain for errors and count its size
+ * Examine a cluster chain for errors and count its size.
  */
 int
 checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 {
 	cl_t current_cl, next_cl;
-	struct bootblock *boot = fat_get_boot(fat);
 
+	/*
+	 * We expect that the caller to give us a real, unvisited 'head'
+	 * cluster, and it must be a valid cluster.  While scanning the
+	 * FAT table, we already excluded all clusters that was claimed
+	 * as a "next" cluster, so if it's still in 'head' bitmap, it must
+	 * not be 'used'.  Assert all the three conditions.
+	 */
+	assert(fat_is_cl_valid(fat, head));
 	assert(fat_is_cl_head(head));
-	assert(head >= CLUST_FIRST && head < boot->NumClusters);
+	assert(!fat_is_cl_used(head));
 
-	fat_set_cl_used(head);
+	/*
+	 * Immediately mark the 'head' cluster that we are about to visit.
+	 * The subsequent nodes would be marked in the following loop.
+	 */
 	fat_clear_cl_head(head);
+	fat_set_cl_used(head);
 
 	/*
 	 * The allocation of a non-zero sized file or directory is
@@ -788,15 +816,14 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 	 * the scan of this chain).
 	 *
 	 * For all other cases, the chain is invalid, and the only
-	 * fix would be to truncate at the current node (mark it
-	 * as EOF)
+	 * viable fix would be to truncate at the current node (mark
+	 * it as EOF) when the next node violates that.
 	 */
 	*chainsize = 0;
 	current_cl = head;
-	for (current_cl = head; ; current_cl = next_cl) {
-		next_cl = fat_get_cl_next(fat, current_cl);
-		if (next_cl < CLUST_FIRST || next_cl > boot->NumClusters)
-			break;
+	for (current_cl = head, next_cl = fat_get_cl_next(fat, current_cl);
+	    fat_is_cl_valid(fat, next_cl);
+	    current_cl = next_cl, next_cl = fat_get_cl_next(fat, current_cl)) {
 		if (fat_is_cl_used(next_cl)) {
 			/* We have seen this CL in somewhere else */
 			pwarn("Cluster %u crossed a chain at %u with %u\n",
@@ -826,14 +853,14 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
  * Clear cluster chain from head.
  */
 void
-clearchain(struct bootblock *boot, struct fat_descriptor *fat, cl_t head)
+clearchain(struct fat_descriptor *fat, cl_t head)
 {
 	cl_t current_cl, next_cl;
+	struct bootblock *boot = fat_get_boot(fat);
 
 	for (current_cl = head;
-	    current_cl >= CLUST_FIRST && current_cl < boot->NumClusters;
-	    current_cl = next_cl) {
-		next_cl = fat_get_cl_next(fat, current_cl);
+	    fat_is_cl_valid(fat, current_cl);
+	    current_cl = next_cl, next_cl = fat_get_cl_next(fat, current_cl)) {
 		fat_set_cl_next(fat, current_cl, CLUST_FREE);
 		boot->NumFree++;
 		if (fat_is_cl_used(current_cl)) {
@@ -910,7 +937,7 @@ checklost(int dosfs, struct bootblock *boot, struct fat_descriptor *fat)
 			if (mod & FSFATAL)
 				break;
 			if (ret == FSERROR && ask(0, "Clear")) {
-				clearchain(boot, fat, head);
+				clearchain(fat, head);
 				mod |= FSFATMOD;
 			}
 			chains--;

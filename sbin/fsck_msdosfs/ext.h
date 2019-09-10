@@ -150,6 +150,6 @@ const char *rsrvdcltype(cl_t);
 /*
  * Clear a cluster chain in a FAT
  */
-void clearchain(struct bootblock *, struct fat_descriptor *, cl_t);
+void clearchain(struct fat_descriptor *, cl_t);
 
 #endif
