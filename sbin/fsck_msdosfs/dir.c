@@ -406,7 +406,17 @@ checksize(struct fat_descriptor *fat, u_char *p, struct dosDirEntry *dir)
 	} else {
 		if (dir->head < CLUST_FIRST || dir->head >= boot->NumClusters)
 			return FSERROR;
-		ret |= checkchain(fat, dir->head, &physicalSize);
+		ret = checkchain(fat, dir->head, &physicalSize);
+		/*
+		 * Upon return, physicalSize would hold the chain length
+		 * that checkchain() was able to validate, but if the user
+		 * refused the proposed repair, it would be unsafe to
+		 * proceed with directory entry fix, so bail out in that
+		 * case.
+		 */
+		if (ret == FSERROR) {
+			return (FSERROR);
+		}
 		physicalSize *= boot->ClusterSize;
 	}
 	if (physicalSize < dir->size) {
@@ -431,7 +441,7 @@ checksize(struct fat_descriptor *fat, u_char *p, struct dosDirEntry *dir)
 			for (cl = dir->head, len = sz = 0;
 			    (sz += boot->ClusterSize) < dir->size; len++)
 				cl = fat_get_cl_next(fat, cl);
-			clearchain(boot, fat, fat_get_cl_next(fat, cl));
+			clearchain(fat, fat_get_cl_next(fat, cl));
 			fat_set_cl_next(fat, cl, CLUST_EOF);
 			return FSFATMOD;
 		} else
@@ -798,7 +808,13 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 							p[26] = p[27] = 0;
 							if (boot->ClustMask == CLUST32_MASK)
 								p[20] = p[21] = 0;
-							clearchain(boot, fat, dirent.head);
+							/*
+							 * Only clear if we never
+							 * seen the head.
+							 */
+							if (!fat_is_cl_used(dirent.head)) {
+								clearchain(fat, dirent.head);
+							}
 							dirent.head = 0;
 							mod |= THISMOD|FSDIRMOD|FSFATMOD;
 						} else
