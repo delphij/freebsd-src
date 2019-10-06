@@ -699,8 +699,6 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 		}
 	}
 
-	fat->boot = boot;
-
 	/* Traverse the FAT table and populate head map */
 	for (cl = CLUST_FIRST; cl < boot->NumClusters; cl++) {
 		nextcl = fat_get_cl_next(fat, cl);
