@@ -50,9 +50,7 @@ static const char rcsid[] =
 #include "ext.h"
 #include "fsutil.h"
 
-static int _readfat(int, struct bootblock *, u_char **);
-
-static bool is_mmapped;
+static int _readfat(struct fat_descriptor *);
 
 /*
  * Used and head bitmaps for FAT scanning.
@@ -92,9 +90,10 @@ static bool is_mmapped;
  * At the end of scanning, we can easily find all lost chain's heads
  * by finding out the 1's in the head bitmap.
  */
+
 typedef struct long_bitmap {
-	size_t		 count;
 	unsigned long	*map;
+	size_t		 count;		/* Total set bits in the map */
 } long_bitmap_t;
 
 static inline void
@@ -174,11 +173,15 @@ bitmap_dtor(long_bitmap_t *lbp)
  * into memory.
  */
 struct fat_descriptor {
-	struct bootblock *boot;
-	size_t		  fatsize;
-	uint8_t		 *fatbuf;
-	long_bitmap_t	usedbitmap;
-	long_bitmap_t	headbitmap;
+	struct bootblock	*boot;
+	uint8_t			*fatbuf;
+	cl_t			(*get)(struct fat_descriptor *, cl_t);
+	int			(*set)(struct fat_descriptor *, cl_t, cl_t);
+	long_bitmap_t		 usedbitmap;
+	long_bitmap_t		 headbitmap;
+	int			 fd;
+	bool			 is_mmapped;
+	size_t		  	 fatsize;
 };
 
 void
@@ -530,63 +533,64 @@ err:
  * Read a FAT from disk. Returns 1 if successful, 0 otherwise.
  */
 static int
-_readfat(int fs, struct bootblock *boot, u_char **buffer)
+_readfat(struct fat_descriptor *fat)
 {
 	off_t off;
-	size_t fatsize;
+	struct bootblock *boot;
 
-	fatsize = boot->FATsecs * boot->bpbBytesPerSec;
+	boot = fat->boot;
+	fat->fatsize = boot->FATsecs * boot->bpbBytesPerSec;
 
 	off = boot->bpbResSectors;
 	off *= boot->bpbBytesPerSec;
 
-	is_mmapped = false;
+	fat->is_mmapped = false;
 
 	/* Attempt to mmap() first */
-	*buffer = mmap(NULL, fatsize, PROT_READ | (rdonly ? 0 : PROT_WRITE),
-	    MAP_SHARED, fs, off);
-	if (*buffer != MAP_FAILED) {
-		is_mmapped = true;
+	fat->fatbuf = mmap(NULL, fat->fatsize,
+			PROT_READ | (rdonly ? 0 : PROT_WRITE),
+			MAP_SHARED, fat->fd, off);
+	if (fat->fatbuf != MAP_FAILED) {
+		fat->is_mmapped = true;
 		return 1;
 	}
 
 	/* mmap failed, create a buffer and read in the FAT table */
-	*buffer = malloc(fatsize);
-	if (*buffer == NULL) {
+	fat->fatbuf = malloc(fat->fatsize);
+	if (fat->fatbuf == NULL) {
 		perr("No space for FAT sectors (%zu)",
 		    (size_t)boot->FATsecs);
 		return 0;
 	}
 
-	if (lseek(fs, off, SEEK_SET) != off) {
+	if (lseek(fat->fd, off, SEEK_SET) != off) {
 		perr("Unable to read FAT");
 		goto err;
 	}
 
-	if ((size_t)read(fs, *buffer,fatsize) != fatsize) {
+	if ((size_t)read(fat->fd, fat->fatbuf, fat->fatsize) != fat->fatsize) {
 		perr("Unable to read FAT");
 		goto err;
 	}
 
 	return 1;
 
-    err:
-	free(*buffer);
+err:
+	free(fat->fatbuf);
+	fat->fatbuf = NULL;
 	return 0;
 }
 
 static void
-releasefat(struct bootblock *boot, u_char **buffer)
+releasefat(struct fat_descriptor *fat)
 {
-	size_t fatsize;
 
-	if (is_mmapped) {
-		fatsize = boot->FATsecs * boot->bpbBytesPerSec;
-		munmap(*buffer, fatsize);
+	if (fat->is_mmapped) {
+		munmap(fat->fatbuf, fat->fatsize);
 	} else {
-		free(*buffer);
+		free(fat->fatbuf);
 	}
-	*buffer = NULL;
+	fat->fatbuf = NULL;
 }
 
 /*
@@ -602,21 +606,24 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 
 	boot->NumFree = boot->NumBad = 0;
 
-	if (!_readfat(fs, boot, &buffer))
-		return FSFATAL;
-
 	fat = calloc(1, sizeof(struct fat_descriptor));
 	if (fat == NULL) {
 		perr("No space for FAT descriptor");
-		releasefat(boot, &buffer);
 		return FSFATAL;
 	}
+
+	fat->fd = fs;
+	fat->boot = boot;
+
+	if (!_readfat(fat))
+		return FSFATAL;
+	buffer = fat->fatbuf;
 
 	if (bitmap_ctor(&(fat->usedbitmap), boot->NumClusters,
 	    false) != FSOK) {
 		perr("No space for used bitmap for FAT clusters (%zu)",
 		    (size_t)boot->NumClusters);
-		releasefat(boot, &buffer);
+		releasefat(fat);
 		free(fat);
 		return FSFATAL;
 	}
@@ -626,7 +633,7 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 		perr("No space for head bitmap for FAT clusters (%zu)",
 		    (size_t)boot->NumClusters);
 		bitmap_dtor(&(fat->usedbitmap));
-		releasefat(boot, &buffer);
+		releasefat(fat);
 		free(fat);
 		return FSFATAL;
 	}
@@ -743,7 +750,7 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 	}
 
 	if (ret & FSFATAL) {
-		releasefat(boot, &buffer);
+		releasefat(fat);
 		free(fat);
 		*fp = NULL;
 	} else
@@ -886,7 +893,7 @@ writefat(int fs, struct fat_descriptor *fat)
 	boot = fat_get_boot(fat);
 
 	fatsz = fat->fatsize;
-	for (i = is_mmapped ? 1 : 0; i < boot->bpbFATs; i++) {
+	for (i = fat->is_mmapped ? 1 : 0; i < boot->bpbFATs; i++) {
 		off = boot->bpbResSectors + i * boot->FATsecs;
 		off *= boot->bpbBytesPerSec;
 		if (lseek(fs, off, SEEK_SET) != off
