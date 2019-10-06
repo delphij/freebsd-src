@@ -87,18 +87,18 @@ int readboot(int, struct bootblock *);
  */
 int writefsinfo(int, struct bootblock *);
 
-/* Mark a cluster as used */
-void fat_set_cl_used(cl_t);
-void fat_clear_cl_used(cl_t cl);
-
-/* Whether a cluster is previously marked as used */
-bool fat_is_cl_used(cl_t);
-
-void fat_clear_cl_head(cl_t);
-bool fat_is_cl_head(cl_t);
-
 /* Opaque type */
 struct fat_descriptor;
+
+/* Mark a cluster as used */
+void fat_set_cl_used(struct fat_descriptor *, cl_t);
+void fat_clear_cl_used(struct fat_descriptor *, cl_t cl);
+
+/* Whether a cluster is previously marked as used */
+bool fat_is_cl_used(struct fat_descriptor *, cl_t);
+
+void fat_clear_cl_head(struct fat_descriptor *, cl_t);
+bool fat_is_cl_head(struct fat_descriptor *, cl_t);
 
 cl_t fat_get_cl_next(struct fat_descriptor *, cl_t);
 

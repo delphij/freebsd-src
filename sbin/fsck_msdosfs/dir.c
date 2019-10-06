@@ -257,7 +257,7 @@ resetDosDirSection(struct fat_descriptor *fat)
 			       boot->bpbRootClust);
 			return FSFATAL;
 		}
-		if (!fat_is_cl_head(boot->bpbRootClust)) {
+		if (!fat_is_cl_head(fat, boot->bpbRootClust)) {
 			pfatal("Root directory doesn't start a cluster chain");
 			return FSFATAL;
 		}
@@ -812,7 +812,7 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 							 * Only clear if we never
 							 * seen the head.
 							 */
-							if (!fat_is_cl_used(dirent.head)) {
+							if (!fat_is_cl_used(fat, dirent.head)) {
 								clearchain(fat, dirent.head);
 							}
 							dirent.head = 0;
@@ -831,7 +831,7 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 					|| dirent.head >= boot->NumClusters
 					|| dircl == CLUST_FREE
 					|| (dircl >= CLUST_RSRVD && dircl < CLUST_EOFS)
-					|| (strcmp(dirent.name, ".") != 0 && !fat_is_cl_head(dirent.head))) {
+					|| (strcmp(dirent.name, ".") != 0 && !fat_is_cl_head(fat, dirent.head))) {
 					if (dirent.head == 0)
 						pwarn("%s has no clusters\n",
 						fullpath(&dirent));
@@ -1150,7 +1150,7 @@ reconnect(int dosfs, struct fat_descriptor *fat, cl_t head, size_t length)
 	p[29] = (u_char)(d.size >> 8);
 	p[30] = (u_char)(d.size >> 16);
 	p[31] = (u_char)(d.size >> 24);
-	fat_set_cl_used(head);
+	fat_set_cl_used(fat, head);
 	if (lseek(dosfs, lfoff, SEEK_SET) != lfoff
 	    || (size_t)write(dosfs, lfbuf, boot->ClusterSize) != boot->ClusterSize) {
 		perr("could not write LOST.DIR");
