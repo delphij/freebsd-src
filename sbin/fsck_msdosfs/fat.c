@@ -368,35 +368,41 @@ fat_set_fat32_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 /*
  * Generic accessor interface for FAT
  */
+static void
+fat_set_accessors(struct fat_descriptor *fat)
+{
+	switch(fat->boot->ClustMask) {
+	case CLUST12_MASK:
+		fat->get = fat_get_fat12_next;
+		fat->set = fat_set_fat12_next;
+		break;
+	case CLUST16_MASK:
+		fat->get = fat_get_fat16_next;
+		fat->set = fat_set_fat16_next;
+		break;
+	case CLUST32_MASK:
+		fat->get = fat_get_fat32_next;
+		fat->set = fat_set_fat32_next;
+		break;
+	default:
+		pfatal("Invalid ClustMask: %d", fat->boot->ClustMask);
+		break;
+	}
+}
+
 cl_t fat_get_cl_next(struct fat_descriptor *fat, cl_t cl)
 {
-	cl_t retval = CLUST_DEAD;
 
 	if (cl < CLUST_FIRST || cl >= fat->boot->NumClusters) {
 		pfatal("Invalid cluster: %ud", cl);
 		return CLUST_DEAD;
 	}
 
-	switch (fat->boot->ClustMask) {
-	case CLUST12_MASK:
-		retval = fat_get_fat12_next(fat, cl);
-		break;
-	case CLUST16_MASK:
-		retval = fat_get_fat16_next(fat, cl);
-		break;
-	case CLUST32_MASK:
-		retval = fat_get_fat32_next(fat, cl);
-		break;
-	default:
-		pfatal("Invalid ClustMask: %d", fat->boot->ClustMask);
-		break;
-	}
-	return (retval);
+	return (fat->get(fat, cl));
 }
 
 int fat_set_cl_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 {
-	int retval = FSFATAL;
 
 	if (rdonly) {
 		pwarn(" (NO WRITE)\n");
@@ -408,21 +414,7 @@ int fat_set_cl_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 		return FSFATAL;
 	}
 
-	switch (fat->boot->ClustMask) {
-	case CLUST12_MASK:
-		retval = fat_set_fat12_next(fat, cl, nextcl);
-		break;
-	case CLUST16_MASK:
-		retval = fat_set_fat16_next(fat, cl, nextcl);
-		break;
-	case CLUST32_MASK:
-		retval = fat_set_fat32_next(fat, cl, nextcl);
-		break;
-	default:
-		pfatal("Invalid ClustMask: %d", fat->boot->ClustMask);
-		break;
-	}
-	return (retval);
+	return (fat->set(fat, cl, nextcl));
 }
 
 static inline struct bootblock*
@@ -618,6 +610,7 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 	if (!_readfat(fat))
 		return FSFATAL;
 	buffer = fat->fatbuf;
+	fat_set_accessors(fat);
 
 	if (bitmap_ctor(&(fat->usedbitmap), boot->NumClusters,
 	    false) != FSOK) {
@@ -706,7 +699,6 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 		}
 	}
 
-	fat->fatbuf = buffer;
 	fat->boot = boot;
 
 	/* Traverse the FAT table and populate head map */
