@@ -46,6 +46,7 @@ extern int alwaysyes;	/* assume "yes" for all questions */
 extern int preen;	/* we are preening */
 extern int rdonly;	/* device is opened read only (supersedes above) */
 extern int skipclean;	/* skip clean file systems if preening */
+extern int allow_mmap;  /* allow the use of mmap() */
 
 /*
  * function declarations
@@ -115,7 +116,7 @@ int readfat(int, struct bootblock *, struct fat_descriptor **);
 /*
  * Write back FAT entries
  */
-int writefat(int, struct fat_descriptor *);
+int writefat(struct fat_descriptor *);
 
 /*
  * Read a directory

@@ -35,6 +35,7 @@ static const char rcsid[] =
 #endif /* not lint */
 
 #include <sys/endian.h>
+#include <sys/queue.h>
 #include <sys/limits.h>
 #include <sys/mman.h>
 #include <sys/param.h>
@@ -51,7 +52,7 @@ static const char rcsid[] =
 #include "fsutil.h"
 
 static int _readfat(struct fat_descriptor *);
-
+static inline struct bootblock* boot_of_(struct fat_descriptor *);
 /*
  * Used and head bitmaps for FAT scanning.
  *
@@ -169,6 +170,22 @@ bitmap_dtor(long_bitmap_t *lbp)
 }
 
 /*
+ * FAT32 can be as big as 256MiB (2^26 entries * 4 bytes), when we
+ * can not ask the kernel to manage the access, use a simple LRU
+ * cache with chunk size of MAXPHYS (128 KiB) to manage it.
+ */
+struct fat32_cache_entry {
+	TAILQ_ENTRY(fat32_cache_entry)	entries;
+	uint8_t			*chunk;		/* pointer to chunk */
+	off_t			 addr;		/* offset */
+	bool			 dirty;		/* dirty bit */
+};
+
+static const size_t	fat32_cache_chunk_size = MAXPHYS;
+static const size_t fat32_cache_size = 4 * 1024 * 1024;	/* 4MiB */
+static const size_t fat32_cache_entries = howmany(fat32_cache_size, fat32_cache_chunk_size);
+
+/*
  * FAT table descriptor, represents a FAT table that is already loaded
  * into memory.
  */
@@ -181,7 +198,14 @@ struct fat_descriptor {
 	long_bitmap_t		 headbitmap;
 	int			 fd;
 	bool			 is_mmapped;
+	bool			 use_cache;
 	size_t		  	 fatsize;
+
+	size_t			 fat32_cached_chunks;
+	TAILQ_HEAD(cachehead, fat32_cache_entry)	fat32_cache_head;
+	struct fat32_cache_entry	*fat32_cache_allentries;
+	off_t			 fat32_offset;
+	off_t			 fat32_lastaddr;
 };
 
 void
@@ -231,7 +255,7 @@ fat_get_head_count(struct fat_descriptor *fat)
  *
  * FAT12s are sufficiently small, expect it to always fit in the RAM.
  */
-static uint8_t *
+static inline uint8_t *
 fat_get_fat12_ptr(struct fat_descriptor *fat, cl_t cl)
 {
 	return (fat->fatbuf + ((cl + (cl >> 1))));
@@ -288,7 +312,7 @@ fat_set_fat12_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
  *
  * FAT16s are sufficiently small, expect it to always fit in the RAM.
  */
-static uint8_t *
+static inline uint8_t *
 fat_get_fat16_ptr(struct fat_descriptor *fat, cl_t cl)
 {
 	return (fat->fatbuf + (cl << 1));
@@ -326,11 +350,9 @@ fat_set_fat16_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 
 /*
  * FAT32 accessors.
- *
- * TODO(delphij): paging support
  */
-static uint8_t *
-fat_get_fat32_ptr(struct fat_descriptor *fat, cl_t cl, bool write __unused)
+static inline uint8_t *
+fat_get_fat32_ptr(struct fat_descriptor *fat, cl_t cl)
 {
 	return (fat->fatbuf + (cl << 2));
 }
@@ -341,7 +363,7 @@ fat_get_fat32_next(struct fat_descriptor *fat, cl_t cl)
 	const uint8_t	*p;
 	cl_t	retval;
 
-	p = fat_get_fat32_ptr(fat, cl, false);
+	p = fat_get_fat32_ptr(fat, cl);
 	retval = le32dec(p) & CLUST32_MASK;
 
 	if (retval >= (CLUST_BAD & CLUST32_MASK))
@@ -358,11 +380,153 @@ fat_set_fat32_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 	/* Truncate 'nextcl' value, if needed */
 	nextcl &= CLUST32_MASK;
 
-	p = fat_get_fat32_ptr(fat, cl, true);
+	p = fat_get_fat32_ptr(fat, cl);
 
 	le32enc(p, (uint32_t)nextcl);
 
 	return (0);
+}
+
+static inline size_t
+fat_get_iosize(struct fat_descriptor *fat, off_t address)
+{
+
+	if (address == fat->fat32_lastaddr) {
+		return (fat->fatsize & ((off_t)MAXPHYS - 1));
+	} else {
+		return (MAXPHYS);
+	}
+}
+
+static int
+fat_flush_fat32_cache_entry(struct fat_descriptor *fat,
+    struct fat32_cache_entry *entry)
+{
+	off_t fat_addr;
+	size_t writesize;
+
+	if (!entry->dirty)
+		return (0);
+
+	writesize = fat_get_iosize(fat, entry->addr);
+
+	fat_addr = fat->fat32_offset + entry->addr;
+	if (lseek(fat->fd, fat_addr, SEEK_SET) != fat_addr ||
+	    (size_t)write(fat->fd, entry->chunk, writesize) != writesize) {
+			pfatal("Unable to write FAT");
+			return (1);
+	}
+
+	entry->dirty = false;
+	return (0);
+}
+
+static struct fat32_cache_entry *
+fat_get_fat32_cache_entry(struct fat_descriptor *fat, off_t addr,
+    bool writing)
+{
+	struct fat32_cache_entry *entry, *first;
+	off_t	fat_addr;
+	size_t	rwsize;
+
+	addr &= ~(fat32_cache_chunk_size - 1);
+
+	first = TAILQ_FIRST(&fat->fat32_cache_head);
+
+	/*
+	 * Cache hit: if we already have the chunk, move it to list head
+	 */
+	TAILQ_FOREACH(entry, &fat->fat32_cache_head, entries) {
+		if (entry->addr == addr) {
+			if (writing) {
+				entry->dirty = true;
+			}
+			if (entry != first) {
+
+				TAILQ_REMOVE(&fat->fat32_cache_head, entry, entries);
+				TAILQ_INSERT_HEAD(&fat->fat32_cache_head, entry, entries);
+			}
+			return (entry);
+		}
+	}
+
+	/*
+	 * Cache miss: detach the chunk at tail of list, overwrite with
+	 * the located chunk, and populate with data from disk.
+	 */
+	entry = TAILQ_LAST(&fat->fat32_cache_head, cachehead);
+	TAILQ_REMOVE(&fat->fat32_cache_head, entry, entries);
+	if (fat_flush_fat32_cache_entry(fat, entry) != 0) {
+		return (NULL);
+	}
+
+	rwsize = fat_get_iosize(fat, addr);
+	fat_addr = fat->fat32_offset + addr;
+	entry->addr = addr;
+	if (lseek(fat->fd, fat_addr, SEEK_SET) != fat_addr ||
+		(size_t)read(fat->fd, entry->chunk, rwsize) != rwsize) {
+		pfatal("Unable to read FAT");
+		return (NULL);
+	}
+	if (writing) {
+		entry->dirty = true;
+	}
+	TAILQ_INSERT_HEAD(&fat->fat32_cache_head, entry, entries);
+
+	return (entry);
+}
+
+static inline uint8_t *
+fat_get_fat32_cached_ptr(struct fat_descriptor *fat, cl_t cl, bool writing)
+{
+	off_t addr, off;
+	struct fat32_cache_entry *entry;
+
+	addr = cl << 2;
+	entry = fat_get_fat32_cache_entry(fat, addr, writing);
+
+	if (entry != NULL) {
+		off = addr & (fat32_cache_chunk_size - 1);
+		return (entry->chunk + off);
+	} else {
+		return (NULL);
+	}
+}
+
+
+static cl_t
+fat_get_fat32_cached_next(struct fat_descriptor *fat, cl_t cl)
+{
+	const uint8_t	*p;
+	cl_t	retval;
+
+	p = fat_get_fat32_cached_ptr(fat, cl, false);
+	if (p != NULL) {
+		retval = le32dec(p) & CLUST32_MASK;
+		if (retval >= (CLUST_BAD & CLUST32_MASK))
+			retval |= ~CLUST32_MASK;
+	} else {
+		retval = CLUST_DEAD;
+	}
+
+	return (retval);
+}
+
+static int
+fat_set_fat32_cached_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
+{
+	uint8_t	*p;
+
+	/* Truncate 'nextcl' value, if needed */
+	nextcl &= CLUST32_MASK;
+
+	p = fat_get_fat32_cached_ptr(fat, cl, true);
+	if (p != NULL) {
+		le32enc(p, (uint32_t)nextcl);
+		return (0);
+	} else {
+		return (1);
+	}
 }
 
 /*
@@ -371,7 +535,7 @@ fat_set_fat32_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 static void
 fat_set_accessors(struct fat_descriptor *fat)
 {
-	switch(fat->boot->ClustMask) {
+	switch(boot_of_(fat)->ClustMask) {
 	case CLUST12_MASK:
 		fat->get = fat_get_fat12_next;
 		fat->set = fat_set_fat12_next;
@@ -381,11 +545,16 @@ fat_set_accessors(struct fat_descriptor *fat)
 		fat->set = fat_set_fat16_next;
 		break;
 	case CLUST32_MASK:
-		fat->get = fat_get_fat32_next;
-		fat->set = fat_set_fat32_next;
+		if (fat->is_mmapped || !fat->use_cache) {
+			fat->get = fat_get_fat32_next;
+			fat->set = fat_set_fat32_next;
+		} else {
+			fat->get = fat_get_fat32_cached_next;
+			fat->set = fat_set_fat32_cached_next;
+		}
 		break;
 	default:
-		pfatal("Invalid ClustMask: %d", fat->boot->ClustMask);
+		pfatal("Invalid ClustMask: %d", boot_of_(fat)->ClustMask);
 		break;
 	}
 }
@@ -393,7 +562,7 @@ fat_set_accessors(struct fat_descriptor *fat)
 cl_t fat_get_cl_next(struct fat_descriptor *fat, cl_t cl)
 {
 
-	if (cl < CLUST_FIRST || cl >= fat->boot->NumClusters) {
+	if (cl < CLUST_FIRST || cl >= boot_of_(fat)->NumClusters) {
 		pfatal("Invalid cluster: %ud", cl);
 		return CLUST_DEAD;
 	}
@@ -409,7 +578,7 @@ int fat_set_cl_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 		return FSFATAL;
 	}
 
-	if (cl < CLUST_FIRST || cl >= fat->boot->NumClusters) {
+	if (cl < CLUST_FIRST || cl >= boot_of_(fat)->NumClusters) {
 		pfatal("Invalid cluster: %ud", cl);
 		return FSFATAL;
 	}
@@ -418,7 +587,7 @@ int fat_set_cl_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 }
 
 static inline struct bootblock*
-fat_get_boot_(struct fat_descriptor *fat) {
+boot_of_(struct fat_descriptor *fat) {
 
 	return (fat->boot);
 }
@@ -426,7 +595,7 @@ fat_get_boot_(struct fat_descriptor *fat) {
 struct bootblock*
 fat_get_boot(struct fat_descriptor *fat) {
 
-	return (fat_get_boot_(fat));
+	return (boot_of_(fat));
 }
 
 /*
@@ -435,7 +604,7 @@ fat_get_boot(struct fat_descriptor *fat) {
 static inline bool
 fat_is_cl_valid(struct fat_descriptor *fat, cl_t cl)
 {
-	const struct bootblock *boot = fat_get_boot_(fat);
+	const struct bootblock *boot = boot_of_(fat);
 
 	return (cl >= CLUST_FIRST && cl < boot->NumClusters);
 }
@@ -527,31 +696,54 @@ err:
 static int
 _readfat(struct fat_descriptor *fat)
 {
+	size_t i;
 	off_t off;
+	size_t readsize;
 	struct bootblock *boot;
+	struct fat32_cache_entry *entry;
 
-	boot = fat->boot;
+	boot = boot_of_(fat);
 	fat->fatsize = boot->FATsecs * boot->bpbBytesPerSec;
 
 	off = boot->bpbResSectors;
 	off *= boot->bpbBytesPerSec;
 
 	fat->is_mmapped = false;
+	fat->use_cache = false;
 
 	/* Attempt to mmap() first */
-	fat->fatbuf = mmap(NULL, fat->fatsize,
-			PROT_READ | (rdonly ? 0 : PROT_WRITE),
-			MAP_SHARED, fat->fd, off);
-	if (fat->fatbuf != MAP_FAILED) {
-		fat->is_mmapped = true;
-		return 1;
+	if (allow_mmap) {
+		fat->fatbuf = mmap(NULL, fat->fatsize,
+				PROT_READ | (rdonly ? 0 : PROT_WRITE),
+				MAP_SHARED, fat->fd, off);
+		if (fat->fatbuf != MAP_FAILED) {
+			fat->is_mmapped = true;
+			return 1;
+		}
 	}
 
-	/* mmap failed, create a buffer and read in the FAT table */
-	fat->fatbuf = malloc(fat->fatsize);
+	/*
+	 * Unfortunately, we were unable to mmap().
+	 *
+	 * Only use the cache manager when it's necessary, that is,
+	 * when the FAT is sufficiently large; in that case, only
+	 * read in the first 4 MiB of FAT into memory, and split the
+	 * buffer into chunks and insert to the LRU queue to populate
+	 * the cache with data.
+	 */
+	if (boot->ClustMask == CLUST32_MASK &&
+	    fat->fatsize >= fat32_cache_size) {
+		readsize = fat32_cache_size;
+		fat->use_cache = true;
+
+		fat->fat32_offset = boot->bpbResSectors * boot->bpbBytesPerSec;
+		fat->fat32_lastaddr = fat->fatsize & ~(fat32_cache_chunk_size);
+	} else {
+		readsize = fat->fatsize;
+	}
+	fat->fatbuf = malloc(readsize);
 	if (fat->fatbuf == NULL) {
-		perr("No space for FAT sectors (%zu)",
-		    (size_t)boot->FATsecs);
+		perr("No space for FAT (%zu)", readsize);
 		return 0;
 	}
 
@@ -559,10 +751,30 @@ _readfat(struct fat_descriptor *fat)
 		perr("Unable to read FAT");
 		goto err;
 	}
-
-	if ((size_t)read(fat->fd, fat->fatbuf, fat->fatsize) != fat->fatsize) {
+	if ((size_t)read(fat->fd, fat->fatbuf, readsize) != readsize) {
 		perr("Unable to read FAT");
 		goto err;
+	}
+
+	/*
+	 * When cache is used, split the buffer into chunks, and
+	 * connect the buffer into the cache.
+	 */
+	if (fat->use_cache) {
+		TAILQ_INIT(&fat->fat32_cache_head);
+		entry = calloc(sizeof(entry), fat32_cache_entries);
+		if (entry == NULL) {
+			perr("No space for FAT cache (%zu of %zu)",
+			    fat32_cache_entries, sizeof(entry));
+			goto err;
+		}
+		for (i = 0; i < fat32_cache_entries; i++) {
+			entry[i].addr = fat32_cache_chunk_size * i;
+			entry[i].chunk = &fat->fatbuf[entry[i].addr];
+			TAILQ_INSERT_TAIL(&fat->fat32_cache_head,
+			    &entry[i], entries);
+		}
+		fat->fat32_cache_allentries = entry;
 	}
 
 	return 1;
@@ -576,10 +788,13 @@ err:
 static void
 releasefat(struct fat_descriptor *fat)
 {
-
 	if (fat->is_mmapped) {
 		munmap(fat->fatbuf, fat->fatsize);
 	} else {
+		if (fat->use_cache) {
+			free(fat->fat32_cache_allentries);
+			fat->fat32_cache_allentries = NULL;
+		}
 		free(fat->fatbuf);
 	}
 	fat->fatbuf = NULL;
@@ -844,7 +1059,7 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 	pwarn("Cluster %u continues with %s cluster number %u\n",
 	    current_cl,
 	    next_cl < CLUST_RSRVD ? "out of range" : "reserved",
-	    next_cl & fat->boot->ClustMask);
+	    next_cl & boot_of_(fat)->ClustMask);
 	return (truncate_at(fat, current_cl, chainsize));
 }
 
@@ -855,7 +1070,7 @@ void
 clearchain(struct fat_descriptor *fat, cl_t head)
 {
 	cl_t current_cl, next_cl;
-	struct bootblock *boot = fat_get_boot(fat);
+	struct bootblock *boot = boot_of_(fat);
 
 	for (current_cl = head;
 	    fat_is_cl_valid(fat, current_cl);
@@ -869,27 +1084,100 @@ clearchain(struct fat_descriptor *fat, cl_t head)
 }
 
 /*
+ * Overwrite the n-th FAT with FAT0
+ */
+static int
+copyfat(struct fat_descriptor *fat, int n)
+{
+	size_t	rwsize, tailsize, blobs, i;
+	off_t	dst_off, src_off;
+	struct bootblock *boot;
+	int ret, fd;
+
+	ret = FSOK;
+	fd = fat->fd;
+	boot = boot_of_(fat);
+
+	blobs = howmany(fat->fatsize, fat32_cache_size);
+	tailsize = fat->fatsize % fat32_cache_size;
+	if (tailsize == 0) {
+		tailsize = fat32_cache_size;
+	}
+	rwsize = fat32_cache_size;
+
+	src_off = fat->fat32_offset;
+	dst_off = boot->bpbResSectors + n * boot->FATsecs;
+	dst_off *= boot->bpbBytesPerSec;
+
+	for (i = 0; i < blobs;
+	    i++, src_off += fat32_cache_size, dst_off += fat32_cache_size) {
+		if (i == blobs - 1) {
+			rwsize = tailsize;
+		}
+		if ((lseek(fd, src_off, SEEK_SET) != src_off ||
+		    (size_t)read(fd, fat->fatbuf, rwsize) != rwsize) &&
+		    ret == FSOK) {
+			perr("Unable to read FAT0");
+			ret = FSFATAL;
+			continue;
+		}
+		if ((lseek(fd, dst_off, SEEK_SET) != dst_off ||
+			(size_t)write(fd, fat->fatbuf, rwsize) != rwsize) &&
+			ret == FSOK) {
+			perr("Unable to write FAT %d", n);
+			ret = FSFATAL;
+		}
+	}
+	return (ret);
+}
+
+/*
  * Write out FAT
  */
 int
-writefat(int fs, struct fat_descriptor *fat)
+writefat(struct fat_descriptor *fat)
 {
 	u_int i;
-	size_t fatsz;
-	off_t off;
-	int ret = FSOK;
+	size_t writesz;
+	off_t dst_base;
+	int ret = FSOK, fd;
 	struct bootblock *boot;
+	struct fat32_cache_entry *entry;
 
-	boot = fat_get_boot(fat);
+	boot = boot_of_(fat);
+	fd = fat->fd;
 
-	fatsz = fat->fatsize;
-	for (i = fat->is_mmapped ? 1 : 0; i < boot->bpbFATs; i++) {
-		off = boot->bpbResSectors + i * boot->FATsecs;
-		off *= boot->bpbBytesPerSec;
-		if (lseek(fs, off, SEEK_SET) != off
-		    || (size_t)write(fs, fat->fatbuf, fatsz) != fatsz) {
-			perr("Unable to write FAT");
-			ret = FSFATAL; /* Return immediately?		XXX */
+	if (fat->use_cache) {
+		/*
+		 * Flush all in-flight cache.
+		 */
+		TAILQ_FOREACH(entry, &fat->fat32_cache_head, entries) {
+			if (fat_flush_fat32_cache_entry(fat, entry) != 0) {
+				if (ret == FSOK) {
+					perr("Unable to write FAT");
+					ret = FSFATAL;
+				}
+			}
+		}
+		if (ret != FSOK)
+			return (ret);
+
+		for (i = 1; i < boot->bpbFATs; i++) {
+			if (copyfat(fat, i) != FSOK)
+				ret = FSFATAL;
+		}
+	} else {
+		writesz = fat->fatsize;
+
+		for (i = fat->is_mmapped ? 1 : 0; i < boot->bpbFATs; i++) {
+			dst_base = boot->bpbResSectors + i * boot->FATsecs;
+			dst_base *= boot->bpbBytesPerSec;
+			if ((lseek(fd, dst_base, SEEK_SET) != dst_base ||
+			    (size_t)write(fd, fat->fatbuf, writesz) != writesz) &&
+			    ret == FSOK) {
+				perr("Unable to write FAT %d", i);
+				ret = FSFATAL;
+			}
 		}
 	}
 
