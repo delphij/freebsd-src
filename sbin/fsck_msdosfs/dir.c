@@ -114,7 +114,7 @@ newDosDirEntry(void)
 
 	if (!(de = freede)) {
 		if (!(de = malloc(sizeof *de)))
-			return 0;
+			return (NULL));
 	} else
 		freede = de->next;
 	return de;
@@ -191,7 +191,7 @@ fullpath(struct dosDirEntry *dir)
 /*
  * Calculate a checksum over an 8.3 alias name
  */
-static u_char
+static inline u_char
 calcShortSum(u_char *p)
 {
 	u_char sum = 0;
@@ -221,22 +221,22 @@ static struct dosDirEntry *lostDir;
 int
 resetDosDirSection(struct fat_descriptor *fat)
 {
-	int b1, b2;
+	int rootdir_size, cluster_size;
 	int ret = FSOK;
 	size_t len;
 	struct bootblock *boot;
 
 	boot = fat_get_boot(fat);
 
-	b1 = boot->bpbRootDirEnts * 32;
-	b2 = boot->bpbSecPerClust * boot->bpbBytesPerSec;
+	rootdir_size = boot->bpbRootDirEnts * 32;
+	cluster_size = boot->bpbSecPerClust * boot->bpbBytesPerSec;
 
-	if ((buffer = malloc(len = MAX(b1, b2))) == NULL) {
+	if ((buffer = malloc(len = MAX(rootdir_size, cluster_size))) == NULL) {
 		perr("No space for directory buffer (%zu)", len);
 		return FSFATAL;
 	}
 
-	if ((delbuf = malloc(len = b2)) == NULL) {
+	if ((delbuf = malloc(len = cluster_size)) == NULL) {
 		free(buffer);
 		perr("No space for directory delbuf (%zu)", len);
 		return FSFATAL;
@@ -445,8 +445,9 @@ checksize(struct fat_descriptor *fat, u_char *p, struct dosDirEntry *dir)
 	return FSOK;
 }
 
-static const u_char dot_name[11]    = ".          ";
-static const u_char dotdot_name[11] = "..         ";
+static const u_char dot_name[11]     = ".          ";
+static const u_char dotdot_name[11]  = "..         ";
+static const u_char lostdir_name[11] = "LOST    DIR";
 
 /*
  * Basic sanity check if the subdirectory have good '.' and '..' entries,
@@ -1069,6 +1070,128 @@ handleDirTree(struct fat_descriptor *fat)
 static u_char *lfbuf;
 static cl_t lfcl;
 static off_t lfoff;
+
+/*
+ * Extends a directory by a cluster
+ */
+static inline int
+extend_directory(struct fat_descriptor *fat, cl_t *cl, char *buf,
+    size_t bufsiz)
+{
+	cl_t nextcl;
+	nextcl = fat_get_cl_next(*cl);
+	assert(nextcl == CLUST_EOF);
+
+	boot = fat_get_boot(fat);
+
+	nextcl = fat_allocate_cluster(fat);
+	if (fat_is_cl_valid(fat, nextcl)) {
+		fat_set_cl_next(fat, *cl, nextcl);
+		fat_set_cl_used(fat, nextcl);
+		*cl = nextcl;
+
+		memset(buf, 0, bufsiz);
+		return (FSOK);
+	}
+
+	return (FSERROR);
+}
+
+/*
+ * Returns the lostdir entry
+ */
+static struct dosDirEntry *
+get_lostdir(int dosfs, struct fat_descriptor *fat)
+{
+	static struct dosDirEntry *saved_lfdir;
+	struct bootblock *boot = fat_get_boot(fat);
+	struct dosDirEntry *de;
+	cl_t lfdir_cl, rootcl;
+	char *rootbuf, *p;
+	int rootdir_size, cluster_size;
+	off_t off;
+	int fd;
+	size_t iosize;
+	bool attempted;
+
+	/*
+	 * Attempt only once, and always return the cached result 
+	 * regardless if it is NULL (explained below).
+	 */
+	if (attempted)
+		return (saved_lfdir);
+	attempted = true;
+
+	/*
+	 * First, look up for an existing LOSTDIR, cache that and
+	 * return if we found one.
+	 */
+	for (saved_lfdir = rootDir->child;
+	    saved_lfdir != NULL;
+	    saved_lfdir = saved_lfdir->next) {
+		if (!strcmp(saved_lfdir->name, LOSTDIR))
+			break;
+	}
+	if (saved_lfdir != NULL)
+		return (saved_lfdir);
+
+	/*
+	 * There is no exisitng LOSTDIR, ask if the user would like
+	 * to create one.  We cache a "no" answer to avoid asking them
+	 * repeatedly.
+	 */
+	if (!ask(1, "Create %s", LOSTDIR))
+		return (NULL);
+
+	/*
+	 * Find a free cluster for the LOST.DIR directory.
+	 *
+	 * If the allocation failed, it means the file system was full,
+	 * and we can't really fix that, so return the same NULL for
+	 * future calls.
+	 */
+	lfdir_cl = fat_allocate_cluster(fat);
+	if (lfdir_cl >= CLUST_FIRST && lfdir_cl < boot->NumClusters) {
+		return (NULL);
+	}
+
+	fd = fat->fd;
+
+	rootdir_size = boot->bpbRootDirEnts * 32;
+
+	if (boot->flags & FAT32) {
+		iosize = boot->bpbSecPerClust * boot->bpbBytesPerSec;
+		rootbuf = malloc(iosize);
+		rootcl = rootDir->head;
+		if (rootbuf == NULL) {
+			perr("No space for directory buffer (%zu)", iosize);
+			return (NULL);
+		}
+		off = (rootcl - CLUST_FIRST) * boot->bpbSecPerClust +
+			boot->FirstCluster;
+		for (;;) {
+			if (lseek(fd, off, SEEK_SET) != off ||
+			    read(fd, rootbuf, last) != last) {
+			perr("Unable to read directory");
+			return FSFATAL;
+			for (p = rootbuf; p < rootbuf + iosize; p += 32)
+				if (*p == SLOT_EMPTY
+				    || *p == SLOT_DELETED)
+					break;
+			if (p < rootbuf + iosize) {
+				break;
+			} else {
+				rootcl = fat_get_cl_next(fat, rootcl);
+
+			}
+		}
+
+
+		}
+
+
+XXXX
+}
 
 int
 reconnect(struct fat_descriptor *fat, cl_t head, size_t length)

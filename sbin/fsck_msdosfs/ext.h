@@ -105,6 +105,8 @@ cl_t fat_get_cl_next(struct fat_descriptor *, cl_t);
 
 int fat_set_cl_next(struct fat_descriptor *, cl_t, cl_t);
 
+cl_t fat_allocate_cluster(struct fat_descriptor *fat);
+
 struct bootblock* fat_get_boot(struct fat_descriptor *);
 int fat_get_fd(struct fat_descriptor *);
 bool fat_is_valid_cl(struct fat_descriptor *, cl_t);

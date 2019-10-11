@@ -141,6 +141,14 @@ bitmap_none_in_range(long_bitmap_t *lbp, cl_t cl)
 	return (lbp->map[i] == 0);
 }
 
+static inline bool
+bitmap_all_set_in_range(long_bitmap_t *lbp, cl_t cl)
+{
+	cl_t i = cl / LONG_BIT;
+
+	return (lbp->map[i] == ~0);
+}
+
 static inline size_t
 bitmap_count(long_bitmap_t *lbp)
 {
@@ -210,6 +218,7 @@ struct fat_descriptor {
 	struct fat32_cache_entry	*fat32_cache_allentries;
 	off_t			 fat32_offset;
 	off_t			 fat32_lastaddr;
+	cl_t			 fat_nextfree;
 };
 
 void
@@ -228,6 +237,12 @@ bool
 fat_is_cl_used(struct fat_descriptor *fat, cl_t cl)
 {
 	return (bitmap_get(&(fat->usedbitmap), cl));
+}
+
+static inline bool
+fat_is_cl_allused_in_range(struct fat_descriptor *fat, cl_t cl)
+{
+	return (bitmap_all_set_in_range(&(fat->usedbitmap), cl));
 }
 
 void
@@ -547,6 +562,45 @@ cl_t fat_get_cl_next(struct fat_descriptor *fat, cl_t cl)
 	}
 
 	return (fat->get(fat, cl));
+}
+
+cl_t fat_allocate_cluster(struct fat_descriptor *fat)
+{
+	cl_t cl, nextcl;
+	struct bootblock *boot;
+
+	boot = boot_of_(fat);
+
+	if (boot->NumFree == 0)
+		return (CLUST_DEAD);
+
+	boot->NumFree--;
+	if (boot->NumFree > 0) {
+		for (cl = fat->fat_nextfree;
+		    fat_is_cl_head_in_range(fat, cl);
+		    cl++) {
+			if (cl % LONG_BIT == 0) &&
+			    fat_is_cl_allused_in_range(fat, head)) {
+				    cl += LONG_BIT;
+				    continue;
+			}
+			if (fat_is_cl_used(fat, cl) || fat_is_cl_head(fat, cl)) {
+				continue;
+			}
+			/*
+			 * Check if the cluster is really free (it might
+			 * belong to a lost chain, or a bad cluster).
+			 */
+			nextcl = fat_get_cl_next(fat, cl);
+			if (nextcl == CLUST_FREE) {
+				nextcl = fat->fat_nextfree;
+				fat->fat_nextfree = cl;
+				return (nextcl);
+			}
+		}
+	}
+
+	return (CLUST_DEAD);
 }
 
 int fat_set_cl_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
@@ -941,12 +995,38 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 		}
 	}
 
-	/* Traverse the FAT table and populate head map */
+	/*
+	 * Traverse the FAT table and populate head map.  We initially
+	 * consider all clusters as possible head cluster (beginning of
+	 * a file or directory), and traverse the whole allocation table
+	 * by marking every non-head nodes as such (detailed below) and
+	 * fix obvious issues while we walk.
+	 *
+	 * For each "next" cluster, the possible values are:
+	 *
+	 * a) CLUST_FREE or CLUST_BAD.  The *current* cluster can't be a
+	 *    head node.
+	 * b) An out-of-range value. The only fix would be to truncate at
+	 *    the cluster.
+	 * c) A valid cluster.  It means that cluster (nextcl) is not a
+	 *    head cluster.  Note that during the scan, every cluster is
+	 *    expected to be seen for at most once, and when we saw them
+	 *    twice, it means a cross-linked chain which should be
+	 *    truncated at the current cluster.
+	 *
+	 * After scan, the remaining set bits indicates a possible file,
+	 * but we do not know if the chain ends with a valid EOF marker,
+	 * that is handled in checkchain() at a later time.
+	 */
 	for (cl = CLUST_FIRST; cl < boot->NumClusters; cl++) {
 		nextcl = fat_get_cl_next(fat, cl);
 
 		/* Check if the next cluster number is valid */
 		if (nextcl == CLUST_FREE) {
+			/* Save a hint for next free cluster */
+			if (fat->fat_nextfree == 0) {
+				fat->fat_nextfree = cl;
+			}
 			if (fat_is_cl_head(fat, cl)) {
 				fat_clear_cl_head(fat, cl);
 			}
@@ -1273,6 +1353,7 @@ checklost(struct fat_descriptor *fat)
 
 	finishlf();
 
+	/* XXX this should not belong here. */
 	if (boot->bpbFSInfo) {
 		ret = 0;
 		if (boot->FSFree != 0xffffffffU &&

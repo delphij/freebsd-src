@@ -88,7 +88,7 @@ CRUNCH_SUPPRESS_LINK_-tcsh= 1
 CRUNCH_SRCDIRS+= sbin
 CRUNCH_PROGS_sbin= 						\
 	camcontrol clri devfs dmesg dump			\
-	dumpfs dumpon fsck fsck_ffs fsck_msdosfs fsdb		\
+	dumpfs dumpon fsck fsck_ffs fsdb		\
 	fsirand gbde geom ifconfig init 			\
 	kldconfig kldload kldstat kldunload ldconfig 		\
 	md5 mdconfig mdmfs mknod mount mount_cd9660		\
