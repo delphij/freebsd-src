@@ -251,12 +251,6 @@ resetDosDirSection(struct fat_descriptor *fat)
 
 	memset(rootDir, 0, sizeof *rootDir);
 	if (boot->flags & FAT32) {
-		if (boot->bpbRootClust < CLUST_FIRST ||
-		    boot->bpbRootClust >= boot->NumClusters) {
-			pfatal("Root directory starts with cluster out of range(%u)",
-			       boot->bpbRootClust);
-			return FSFATAL;
-		}
 		if (!fat_is_cl_head(fat, boot->bpbRootClust)) {
 			pfatal("Root directory doesn't start a cluster chain");
 			return FSFATAL;
