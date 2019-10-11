@@ -152,9 +152,6 @@ readboot(int dosfs, struct bootblock *boot)
 		boot->NumSectors = boot->bpbHugeSectors;
 	}
 
-
-
-
 	if (boot->flags & FAT32) {
 		/* If the OEM Name field is EXFAT, it's not FAT32, so bail */
 		if (!memcmp(&block[3], "EXFAT   ", 8)) {
@@ -272,8 +269,15 @@ readboot(int dosfs, struct bootblock *boot)
 	boot->NumClusters = (boot->NumSectors - boot->FirstCluster) / boot->bpbSecPerClust +
 	    CLUST_FIRST;
 
-	if (boot->flags & FAT32)
+	if (boot->flags & FAT32) {
+		if (boot->bpbRootClust < CLUST_FIRST ||
+		    boot->bpbRootClust >= boot->NumClusters) {
+			pfatal("Root directory starts with cluster out of range(%u)",
+			       boot->bpbRootClust);
+			return FSFATAL;
+		}
 		boot->ClustMask = CLUST32_MASK;
+	}
 	else if (boot->NumClusters < (CLUST_RSRVD&CLUST12_MASK))
 		boot->ClustMask = CLUST12_MASK;
 	else if (boot->NumClusters < (CLUST_RSRVD&CLUST16_MASK))
