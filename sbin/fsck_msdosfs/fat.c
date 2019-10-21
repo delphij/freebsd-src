@@ -792,7 +792,7 @@ _readfat(struct fat_descriptor *fat)
 	 */
 	if (fat->use_cache) {
 		TAILQ_INIT(&fat->fat32_cache_head);
-		entry = calloc(sizeof(entry), fat32_cache_entries);
+		entry = calloc(fat32_cache_entries, sizeof(*entry));
 		if (entry == NULL) {
 			perr("No space for FAT cache (%zu of %zu)",
 			    fat32_cache_entries, sizeof(entry));
