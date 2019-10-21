@@ -270,19 +270,29 @@ readboot(int dosfs, struct bootblock *boot)
 	    CLUST_FIRST;
 
 	if (boot->flags & FAT32) {
+		if (boot->NumClusters > (CLUST_RSRVD & CLUST32_MASK)) {
+			pfatal("Filesystem too big (%u clusters) for FAT32 partition",
+			    boot->NumClusters);
+			return FSFATAL;
+		}
+		if (boot->NumClusters < (CLUST_RSRVD & CLUST16_MASK)) {
+			pfatal("Filesystem too small (%u clusters) for FAT32 partition",
+			    boot->NumClusters);
+			return FSFATAL;
+		}
+		boot->ClustMask = CLUST32_MASK;
+
 		if (boot->bpbRootClust < CLUST_FIRST ||
 		    boot->bpbRootClust >= boot->NumClusters) {
 			pfatal("Root directory starts with cluster out of range(%u)",
 			       boot->bpbRootClust);
 			return FSFATAL;
 		}
-		boot->ClustMask = CLUST32_MASK;
-	}
-	else if (boot->NumClusters < (CLUST_RSRVD&CLUST12_MASK))
+	} else if (boot->NumClusters < (CLUST_RSRVD&CLUST12_MASK)) {
 		boot->ClustMask = CLUST12_MASK;
-	else if (boot->NumClusters < (CLUST_RSRVD&CLUST16_MASK))
+	} else if (boot->NumClusters < (CLUST_RSRVD&CLUST16_MASK)) {
 		boot->ClustMask = CLUST16_MASK;
-	else {
+	} else {
 		pfatal("Filesystem too big (%u clusters) for non-FAT32 partition",
 		       boot->NumClusters);
 		return FSFATAL;
