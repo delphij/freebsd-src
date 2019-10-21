@@ -538,36 +538,6 @@ fat_set_fat32_cached_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 	}
 }
 
-/*
- * Generic accessor interface for FAT
- */
-static void
-fat_set_accessors(struct fat_descriptor *fat)
-{
-	switch(boot_of_(fat)->ClustMask) {
-	case CLUST12_MASK:
-		fat->get = fat_get_fat12_next;
-		fat->set = fat_set_fat12_next;
-		break;
-	case CLUST16_MASK:
-		fat->get = fat_get_fat16_next;
-		fat->set = fat_set_fat16_next;
-		break;
-	case CLUST32_MASK:
-		if (fat->is_mmapped || !fat->use_cache) {
-			fat->get = fat_get_fat32_next;
-			fat->set = fat_set_fat32_next;
-		} else {
-			fat->get = fat_get_fat32_cached_next;
-			fat->set = fat_set_fat32_cached_next;
-		}
-		break;
-	default:
-		pfatal("Invalid ClustMask: %d", boot_of_(fat)->ClustMask);
-		break;
-	}
-}
-
 cl_t fat_get_cl_next(struct fat_descriptor *fat, cl_t cl)
 {
 
@@ -852,10 +822,37 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 	fat->fd = fs;
 	fat->boot = boot;
 
-	if (!_readfat(fat))
+	if (!_readfat(fat)) {
+		free(fat);
 		return FSFATAL;
+	}
 	buffer = fat->fatbuf;
-	fat_set_accessors(fat);
+
+	/* Populate accessors */
+	switch(boot->ClustMask) {
+	case CLUST12_MASK:
+		fat->get = fat_get_fat12_next;
+		fat->set = fat_set_fat12_next;
+		break;
+	case CLUST16_MASK:
+		fat->get = fat_get_fat16_next;
+		fat->set = fat_set_fat16_next;
+		break;
+	case CLUST32_MASK:
+		if (fat->is_mmapped || !fat->use_cache) {
+			fat->get = fat_get_fat32_next;
+			fat->set = fat_set_fat32_next;
+		} else {
+			fat->get = fat_get_fat32_cached_next;
+			fat->set = fat_set_fat32_cached_next;
+		}
+		break;
+	default:
+		pfatal("Invalid ClustMask: %d", boot_of_(fat)->ClustMask);
+		releasefat(fat);
+		free(fat);
+		return FSFATAL;
+	}
 
 	if (bitmap_ctor(&(fat->usedbitmap), boot->NumClusters,
 	    false) != FSOK) {
@@ -1065,7 +1062,7 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 	 */
 	*chainsize = 0;
 	current_cl = head;
-	for (current_cl = head, next_cl = fat_get_cl_next(fat, current_cl);
+	for (next_cl = fat_get_cl_next(fat, current_cl);
 	    valid_cl(fat, next_cl);
 	    current_cl = next_cl, next_cl = fat_get_cl_next(fat, current_cl)) {
 		if (fat_is_cl_used(fat, next_cl)) {
@@ -1106,15 +1103,18 @@ clearchain(struct fat_descriptor *fat, cl_t head)
 	cl_t current_cl, next_cl;
 	struct bootblock *boot = boot_of_(fat);
 
-	for (current_cl = head;
-	    valid_cl(fat, current_cl);
-	    current_cl = next_cl, next_cl = fat_get_cl_next(fat, current_cl)) {
+	current_cl = head;
+
+	while (valid_cl(fat, current_cl)) {
+		next_cl = fat_get_cl_next(fat, head);
 		fat_set_cl_next(fat, current_cl, CLUST_FREE);
 		boot->NumFree++;
 		if (fat_is_cl_used(fat, current_cl)) {
 			fat_clear_cl_used(fat, current_cl);
 		}
+		current_cl = next_cl;
 	}
+
 }
 
 /*
