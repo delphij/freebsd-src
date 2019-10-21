@@ -53,6 +53,8 @@ static const char rcsid[] =
 
 static int _readfat(struct fat_descriptor *);
 static inline struct bootblock* boot_of_(struct fat_descriptor *);
+static inline int fd_of_(struct fat_descriptor *);
+
 /*
  * Used and head bitmaps for FAT scanning.
  *
@@ -402,8 +404,11 @@ static int
 fat_flush_fat32_cache_entry(struct fat_descriptor *fat,
     struct fat32_cache_entry *entry)
 {
+	int fd;
 	off_t fat_addr;
 	size_t writesize;
+
+	fd = fd_of_(fat);
 
 	if (!entry->dirty)
 		return (0);
@@ -411,8 +416,8 @@ fat_flush_fat32_cache_entry(struct fat_descriptor *fat,
 	writesize = fat_get_iosize(fat, entry->addr);
 
 	fat_addr = fat->fat32_offset + entry->addr;
-	if (lseek(fat->fd, fat_addr, SEEK_SET) != fat_addr ||
-	    (size_t)write(fat->fd, entry->chunk, writesize) != writesize) {
+	if (lseek(fd, fat_addr, SEEK_SET) != fat_addr ||
+	    (size_t)write(fd, entry->chunk, writesize) != writesize) {
 			pfatal("Unable to write FAT");
 			return (1);
 	}
@@ -425,6 +430,7 @@ static struct fat32_cache_entry *
 fat_get_fat32_cache_entry(struct fat_descriptor *fat, off_t addr,
     bool writing)
 {
+	int fd;
 	struct fat32_cache_entry *entry, *first;
 	off_t	fat_addr;
 	size_t	rwsize;
@@ -463,8 +469,9 @@ fat_get_fat32_cache_entry(struct fat_descriptor *fat, off_t addr,
 	rwsize = fat_get_iosize(fat, addr);
 	fat_addr = fat->fat32_offset + addr;
 	entry->addr = addr;
-	if (lseek(fat->fd, fat_addr, SEEK_SET) != fat_addr ||
-		(size_t)read(fat->fd, entry->chunk, rwsize) != rwsize) {
+	fd = fd_of_(fat);
+	if (lseek(fd, fat_addr, SEEK_SET) != fat_addr ||
+		(size_t)read(fd, entry->chunk, rwsize) != rwsize) {
 		pfatal("Unable to read FAT");
 		return (NULL);
 	}
@@ -598,6 +605,18 @@ fat_get_boot(struct fat_descriptor *fat) {
 	return (boot_of_(fat));
 }
 
+static inline int
+fd_of_(struct fat_descriptor *fat)
+{
+	return (fat->fd);
+}
+
+int
+fat_get_fd(struct fat_descriptor * fat)
+{
+	return (fd_of_(fat));
+}
+
 /*
  * Whether a cl is in valid data range.
  */
@@ -696,6 +715,7 @@ err:
 static int
 _readfat(struct fat_descriptor *fat)
 {
+	int fd;
 	size_t i;
 	off_t off;
 	size_t readsize;
@@ -703,6 +723,7 @@ _readfat(struct fat_descriptor *fat)
 	struct fat32_cache_entry *entry;
 
 	boot = boot_of_(fat);
+	fd = fd_of_(fat);
 	fat->fatsize = boot->FATsecs * boot->bpbBytesPerSec;
 
 	off = boot->bpbResSectors;
@@ -715,7 +736,7 @@ _readfat(struct fat_descriptor *fat)
 	if (allow_mmap) {
 		fat->fatbuf = mmap(NULL, fat->fatsize,
 				PROT_READ | (rdonly ? 0 : PROT_WRITE),
-				MAP_SHARED, fat->fd, off);
+				MAP_SHARED, fd_of_(fat), off);
 		if (fat->fatbuf != MAP_FAILED) {
 			fat->is_mmapped = true;
 			return 1;
@@ -747,11 +768,11 @@ _readfat(struct fat_descriptor *fat)
 		return 0;
 	}
 
-	if (lseek(fat->fd, off, SEEK_SET) != off) {
+	if (lseek(fd, off, SEEK_SET) != off) {
 		perr("Unable to read FAT");
 		goto err;
 	}
-	if ((size_t)read(fat->fd, fat->fatbuf, readsize) != readsize) {
+	if ((size_t)read(fd, fat->fatbuf, readsize) != readsize) {
 		perr("Unable to read FAT");
 		goto err;
 	}
@@ -944,11 +965,12 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 			if (fat_is_cl_head(fat, nextcl)) {
 				fat_clear_cl_head(fat, nextcl);
 			} else {
-				/*
-				 * We know cl have crossed another
-				 * chain that we have already visited.
-				 * Ignore this for now.
-				 */
+				pwarn("Cluster %u crossed another chain at %u\n",
+				    cl, nextcl);
+				if (ask(0, "Truncate")) {
+					fat_set_cl_next(fat, cl, CLUST_EOF);
+					ret |= FSFATMOD;
+				}
 			}
 		}
 
@@ -1039,7 +1061,11 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 	    fat_is_cl_valid(fat, next_cl);
 	    current_cl = next_cl, next_cl = fat_get_cl_next(fat, current_cl)) {
 		if (fat_is_cl_used(fat, next_cl)) {
-			/* We have seen this CL in somewhere else */
+			/*
+			 * We have seen this cluster somewhere else.  This can
+			 * only happen if the user choose to not fix the issue
+			 * while we scan FAT (they should have).
+			 */
 			pwarn("Cluster %u crossed a chain at %u with %u\n",
 			    head, current_cl, next_cl);
 			return (truncate_at(fat, current_cl, chainsize));
@@ -1095,7 +1121,7 @@ copyfat(struct fat_descriptor *fat, int n)
 	int ret, fd;
 
 	ret = FSOK;
-	fd = fat->fd;
+	fd = fd_of_(fat);
 	boot = boot_of_(fat);
 
 	blobs = howmany(fat->fatsize, fat32_cache_size);
@@ -1145,7 +1171,7 @@ writefat(struct fat_descriptor *fat)
 	struct fat32_cache_entry *entry;
 
 	boot = boot_of_(fat);
-	fd = fat->fd;
+	fd = fd_of_(fat);
 
 	if (fat->use_cache) {
 		/*
@@ -1188,12 +1214,16 @@ writefat(struct fat_descriptor *fat)
  * Check a complete in-memory FAT for lost cluster chains
  */
 int
-checklost(int dosfs, struct bootblock *boot, struct fat_descriptor *fat)
+checklost(struct fat_descriptor *fat)
 {
 	cl_t head;
 	int mod = FSOK;
-	int ret;
+	int dosfs, ret;
 	size_t chains, chainlength;
+	struct bootblock *boot;
+
+	dosfs = fd_of_(fat);
+	boot = boot_of_(fat);
 
 	/*
 	 * At this point, we have already traversed all directories.
@@ -1219,7 +1249,7 @@ checklost(int dosfs, struct bootblock *boot, struct fat_descriptor *fat)
 				pwarn("Lost cluster chain at cluster %u\n"
 				    "%zd Cluster(s) lost\n",
 				    head, chainlength);
-				mod |= ret = reconnect(dosfs, fat, head,
+				mod |= ret = reconnect(fat, head,
 				    chainlength);
 			}
 			if (mod & FSFATAL)

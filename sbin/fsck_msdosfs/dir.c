@@ -96,11 +96,11 @@ static struct dirTodoNode *newDirTodo(void);
 static void freeDirTodo(struct dirTodoNode *);
 static char *fullpath(struct dosDirEntry *);
 static u_char calcShortSum(u_char *);
-static int delete(int, struct fat_descriptor *, cl_t, int, cl_t, int, int);
-static int removede(int, struct fat_descriptor *, u_char *, u_char *,
+static int delete(struct fat_descriptor *, cl_t, int, cl_t, int, int);
+static int removede(struct fat_descriptor *, u_char *, u_char *,
     cl_t, cl_t, cl_t, char *, int);
 static int checksize(struct fat_descriptor *, u_char *, struct dosDirEntry *);
-static int readDosDirSection(int, struct fat_descriptor *, struct dosDirEntry *);
+static int readDosDirSection(struct fat_descriptor *, struct dosDirEntry *);
 
 /*
  * Manage free dosDirEntry structures.
@@ -295,15 +295,16 @@ finishDosDirSection(void)
  * Delete directory entries between startcl, startoff and endcl, endoff.
  */
 static int
-delete(int f, struct fat_descriptor *fat, cl_t startcl,
+delete(struct fat_descriptor *fat, cl_t startcl,
     int startoff, cl_t endcl, int endoff, int notlast)
 {
 	u_char *s, *e;
 	off_t off;
-	int clsz;
+	int clsz, fd;
 	struct bootblock *boot;
 
 	boot = fat_get_boot(fat);
+	fd = fat_get_fd(fat);
 	clsz = boot->bpbSecPerClust * boot->bpbBytesPerSec;
 
 	s = delbuf + startoff;
@@ -317,11 +318,11 @@ delete(int f, struct fat_descriptor *fat, cl_t startcl,
 		off = (startcl - CLUST_FIRST) * boot->bpbSecPerClust + boot->FirstCluster;
 
 		off *= boot->bpbBytesPerSec;
-		if (lseek(f, off, SEEK_SET) != off) {
+		if (lseek(fd, off, SEEK_SET) != off) {
 			perr("Unable to lseek to %" PRId64, off);
 			return FSFATAL;
 		}
-		if (read(f, delbuf, clsz) != clsz) {
+		if (read(fd, delbuf, clsz) != clsz) {
 			perr("Unable to read directory");
 			return FSFATAL;
 		}
@@ -329,11 +330,11 @@ delete(int f, struct fat_descriptor *fat, cl_t startcl,
 			*s = SLOT_DELETED;
 			s += 32;
 		}
-		if (lseek(f, off, SEEK_SET) != off) {
+		if (lseek(fd, off, SEEK_SET) != off) {
 			perr("Unable to lseek to %" PRId64, off);
 			return FSFATAL;
 		}
-		if (write(f, delbuf, clsz) != clsz) {
+		if (write(fd, delbuf, clsz) != clsz) {
 			perr("Unable to write directory");
 			return FSFATAL;
 		}
@@ -346,7 +347,7 @@ delete(int f, struct fat_descriptor *fat, cl_t startcl,
 }
 
 static int
-removede(int f, struct fat_descriptor *fat, u_char *start,
+removede(struct fat_descriptor *fat, u_char *start,
     u_char *end, cl_t startcl, cl_t endcl, cl_t curcl,
     char *path, int type)
 {
@@ -364,7 +365,7 @@ removede(int f, struct fat_descriptor *fat, u_char *start,
 	}
 	if (ask(0, "Remove")) {
 		if (startcl != curcl) {
-			if (delete(f, fat,
+			if (delete(fat,
 				   startcl, start - buffer,
 				   endcl, end - buffer,
 				   endcl == curcl) == FSFATAL)
@@ -453,7 +454,7 @@ static const u_char dotdot_name[11] = "..         ";
  * when we traverse into it.
  */
 static int
-check_subdirectory(int f, struct bootblock *boot, struct dosDirEntry *dir)
+check_subdirectory(int fd, struct bootblock *boot, struct dosDirEntry *dir)
 {
 	u_char *buf, *cp;
 	off_t off;
@@ -485,8 +486,8 @@ check_subdirectory(int f, struct bootblock *boot, struct dosDirEntry *dir)
 	}
 
 	off *= boot->bpbBytesPerSec;
-	if (lseek(f, off, SEEK_SET) != off ||
-	    read(f, buf, boot->bpbBytesPerSec) != (ssize_t)boot->bpbBytesPerSec) {
+	if (lseek(fd, off, SEEK_SET) != off ||
+	    read(fd, buf, boot->bpbBytesPerSec) != (ssize_t)boot->bpbBytesPerSec) {
 		perr("Unable to read directory");
 		free(buf);
 		return FSFATAL;
@@ -520,13 +521,13 @@ check_subdirectory(int f, struct bootblock *boot, struct dosDirEntry *dir)
  *   - push directories onto the todo-stack
  */
 static int
-readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
+readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 {
 	struct bootblock *boot;
 	struct dosDirEntry dirent, *d;
 	u_char *p, *vallfn, *invlfn, *empty;
 	off_t off;
-	int i, j, k, last;
+	int fd, i, j, k, last;
 	cl_t cl, dircl, valcl = ~0, invcl = ~0, empcl = ~0;
 	char *t;
 	u_int lidx = 0;
@@ -536,6 +537,7 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 #define	THISMOD	0x8000			/* Only used within this routine */
 
 	boot = fat_get_boot(fat);
+	fd = fat_get_fd(fat);
 
 	cl = dir->head;
 	if (dir->parent && (cl < CLUST_FIRST || cl >= boot->NumClusters)) {
@@ -564,8 +566,8 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 		}
 
 		off *= boot->bpbBytesPerSec;
-		if (lseek(f, off, SEEK_SET) != off
-		    || read(f, buffer, last) != last) {
+		if (lseek(fd, off, SEEK_SET) != off
+		    || read(fd, buffer, last) != last) {
 			perr("Unable to read directory");
 			return FSFATAL;
 		}
@@ -593,7 +595,7 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 						u_char *q;
 
 						dir->fsckflags &= ~DIREMPTY;
-						if (delete(f, fat,
+						if (delete(fat,
 							   empcl, empty - buffer,
 							   cl, p - buffer, 1) == FSFATAL)
 							return FSFATAL;
@@ -722,7 +724,7 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 
 			if (dirent.flags & ATTR_VOLUME) {
 				if (vallfn || invlfn) {
-					mod |= removede(f, fat,
+					mod |= removede(fat,
 							invlfn ? invlfn : vallfn, p,
 							invlfn ? invcl : valcl, -1, 0,
 							fullpath(dir), 2);
@@ -762,7 +764,7 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 			dirent.next = dir->child;
 
 			if (invlfn) {
-				mod |= k = removede(f, fat,
+				mod |= k = removede(fat,
 						    invlfn, vallfn ? vallfn : p,
 						    invcl, vallfn ? valcl : cl, cl,
 						    fullpath(&dirent), 0);
@@ -948,7 +950,7 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 						} else
 							mod |= FSERROR;
 						continue;
-					} else if ((check_subdirectory(f, boot,
+					} else if ((check_subdirectory(fd, boot,
 					    &dirent) & FSERROR) == FSERROR) {
 						/*
 						 * A subdirectory should have
@@ -996,8 +998,8 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 
 		if (mod & THISMOD) {
 			last *= 32;
-			if (lseek(f, off, SEEK_SET) != off
-			    || write(f, buffer, last) != last) {
+			if (lseek(fd, off, SEEK_SET) != off
+			    || write(fd, buffer, last) != last) {
 				perr("Unable to write directory");
 				return FSFATAL;
 			}
@@ -1005,7 +1007,7 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 		}
 	} while ((cl = fat_get_cl_next(fat, cl)) >= CLUST_FIRST && cl < boot->NumClusters);
 	if (invlfn || vallfn)
-		mod |= removede(f, fat,
+		mod |= removede(fat,
 				invlfn ? invlfn : vallfn, p,
 				invlfn ? invcl : valcl, -1, 0,
 				fullpath(dir), 1);
@@ -1015,8 +1017,8 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 	 */
 	if ((mod & FSDIRMOD) && !(boot->flags & FAT32) && !dir->parent) {
 		last *= 32;
-		if (lseek(f, off, SEEK_SET) != off
-		    || write(f, buffer, last) != last) {
+		if (lseek(fd, off, SEEK_SET) != off
+		    || write(fd, buffer, last) != last) {
 			perr("Unable to write directory");
 			return FSFATAL;
 		}
@@ -1026,11 +1028,11 @@ readDosDirSection(int f, struct fat_descriptor *fat, struct dosDirEntry *dir)
 }
 
 int
-handleDirTree(int dosfs, struct fat_descriptor *fat)
+handleDirTree(struct fat_descriptor *fat)
 {
 	int mod;
 
-	mod = readDosDirSection(dosfs, fat, rootDir);
+	mod = readDosDirSection(fat, rootDir);
 	if (mod & FSFATAL)
 		return FSFATAL;
 
@@ -1051,7 +1053,7 @@ handleDirTree(int dosfs, struct fat_descriptor *fat)
 		/*
 		 * handle subdirectory
 		 */
-		mod |= readDosDirSection(dosfs, fat, dir);
+		mod |= readDosDirSection(fat, dir);
 		if (mod & FSFATAL)
 			return FSFATAL;
 	}
@@ -1067,12 +1069,14 @@ static cl_t lfcl;
 static off_t lfoff;
 
 int
-reconnect(int dosfs, struct fat_descriptor *fat, cl_t head, size_t length)
+reconnect(struct fat_descriptor *fat, cl_t head, size_t length)
 {
 	struct bootblock *boot = fat_get_boot(fat);
 	struct dosDirEntry d;
-	int len;
+	int len, dosfs;
 	u_char *p;
+
+	dosfs = fat_get_fd(fat);
 
 	if (!ask(1, "Reconnect"))
 		return FSERROR;

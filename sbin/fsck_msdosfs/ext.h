@@ -106,6 +106,7 @@ cl_t fat_get_cl_next(struct fat_descriptor *, cl_t);
 int fat_set_cl_next(struct fat_descriptor *, cl_t, cl_t);
 
 struct bootblock* fat_get_boot(struct fat_descriptor *);
+int fat_get_fd(struct fat_descriptor *);
 
 /*
  * Read the FAT 0 and return a pointer to the newly allocated
@@ -123,7 +124,7 @@ int writefat(struct fat_descriptor *);
  */
 int resetDosDirSection(struct fat_descriptor *);
 void finishDosDirSection(void);
-int handleDirTree(int, struct fat_descriptor *);
+int handleDirTree(struct fat_descriptor *);
 
 /*
  * Cross-check routines run after everything is completely in memory
@@ -133,11 +134,11 @@ int checkchain(struct fat_descriptor *, cl_t, size_t *);
 /*
  * Check for lost cluster chains
  */
-int checklost(int, struct bootblock *, struct fat_descriptor *);
+int checklost(struct fat_descriptor *);
 /*
  * Try to reconnect a lost cluster chain
  */
-int reconnect(int, struct fat_descriptor *, cl_t, size_t);
+int reconnect(struct fat_descriptor *, cl_t, size_t);
 void finishlf(void);
 
 /*
