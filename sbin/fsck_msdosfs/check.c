@@ -105,14 +105,14 @@ checkfilesys(const char *fname)
 		goto out;
 	/* delay writing FATs */
 
-	mod |= handleDirTree(dosfs, fat);
+	mod |= handleDirTree(fat);
 	if (mod & FSFATAL)
 		goto out;
 
 	if (!preen)
 		printf("** Phase 3 - Checking for Lost Files\n");
 
-	mod |= checklost(dosfs, &boot, fat);
+	mod |= checklost(fat);
 	if (mod & FSFATAL)
 		goto out;
 
