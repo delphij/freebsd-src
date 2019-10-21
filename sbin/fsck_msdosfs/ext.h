@@ -107,6 +107,7 @@ int fat_set_cl_next(struct fat_descriptor *, cl_t, cl_t);
 
 struct bootblock* fat_get_boot(struct fat_descriptor *);
 int fat_get_fd(struct fat_descriptor *);
+bool fat_is_valid_cl(struct fat_descriptor *, cl_t);
 
 /*
  * Read the FAT 0 and return a pointer to the newly allocated

@@ -309,7 +309,7 @@ delete(struct fat_descriptor *fat, cl_t startcl,
 
 	s = delbuf + startoff;
 	e = delbuf + clsz;
-	while (startcl >= CLUST_FIRST && startcl < boot->NumClusters) {
+	while (fat_is_valid_cl(fat, startcl)) {
 		if (startcl == endcl) {
 			if (notlast)
 				break;
@@ -399,7 +399,7 @@ checksize(struct fat_descriptor *fat, u_char *p, struct dosDirEntry *dir)
 	if (dir->head == CLUST_FREE) {
 		physicalSize = 0;
 	} else {
-		if (dir->head < CLUST_FIRST || dir->head >= boot->NumClusters)
+		if (!fat_is_valid_cl(fat, dir->head))
 			return FSERROR;
 		ret = checkchain(fat, dir->head, &physicalSize);
 		/*
@@ -454,15 +454,20 @@ static const u_char dotdot_name[11] = "..         ";
  * when we traverse into it.
  */
 static int
-check_subdirectory(int fd, struct bootblock *boot, struct dosDirEntry *dir)
+check_subdirectory(struct fat_descriptor *fat, struct dosDirEntry *dir)
 {
 	u_char *buf, *cp;
 	off_t off;
 	cl_t cl;
 	int retval = FSOK;
+	int fd;
+	struct bootblock *boot;
+
+	boot = fat_get_boot(fat);
+	fd = fat_get_fd(fat);
 
 	cl = dir->head;
-	if (dir->parent && (cl < CLUST_FIRST || cl >= boot->NumClusters)) {
+	if (dir->parent && !fat_is_valid_cl(fat, cl)) {
 		return FSERROR;
 	}
 
@@ -540,7 +545,7 @@ readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 	fd = fat_get_fd(fat);
 
 	cl = dir->head;
-	if (dir->parent && (cl < CLUST_FIRST || cl >= boot->NumClusters)) {
+	if (dir->parent && (!fat_is_valid_cl(fat, cl))) {
 		/*
 		 * Already handled somewhere else.
 		 */
@@ -788,8 +793,7 @@ readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 				 * so explicitly skip.
 				 */
 			} else {
-				if (dirent.head >= CLUST_FIRST &&
-				    dirent.head < boot->NumClusters) {
+				if (fat_is_valid_cl(fat, dirent.head)) {
 					dircl = fat_get_cl_next(fat,
 					    dirent.head);
 				} else {
@@ -823,16 +827,14 @@ readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 					/*
 					*  Do nothing, the parent is the root
 					*/
-				} else if (dirent.head < CLUST_FIRST
-					|| dirent.head >= boot->NumClusters
+				} else if (!fat_is_valid_cl(fat, dirent.head)
 					|| dircl == CLUST_FREE
 					|| (dircl >= CLUST_RSRVD && dircl < CLUST_EOFS)
 					|| (strcmp(dirent.name, ".") != 0 && !fat_is_cl_head(fat, dirent.head))) {
 					if (dirent.head == 0)
 						pwarn("%s has no clusters\n",
 						fullpath(&dirent));
-					else if (dirent.head < CLUST_FIRST
-						|| dirent.head >= boot->NumClusters)
+					else if (!fat_is_valid_cl(fat, dirent.head))
 						pwarn("%s starts with cluster out of range(%u)\n",
 						fullpath(&dirent),
 						dirent.head);
@@ -950,7 +952,7 @@ readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 						} else
 							mod |= FSERROR;
 						continue;
-					} else if ((check_subdirectory(fd, boot,
+					} else if ((check_subdirectory(fat,
 					    &dirent) & FSERROR) == FSERROR) {
 						/*
 						 * A subdirectory should have
@@ -1005,7 +1007,7 @@ readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 			}
 			mod &= ~THISMOD;
 		}
-	} while ((cl = fat_get_cl_next(fat, cl)) >= CLUST_FIRST && cl < boot->NumClusters);
+	} while (fat_is_valid_cl(fat, (cl = fat_get_cl_next(fat, cl))));
 	if (invlfn || vallfn)
 		mod |= removede(fat,
 				invlfn ? invlfn : vallfn, p,

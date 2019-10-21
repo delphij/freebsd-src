@@ -54,6 +54,8 @@ static const char rcsid[] =
 static int _readfat(struct fat_descriptor *);
 static inline struct bootblock* boot_of_(struct fat_descriptor *);
 static inline int fd_of_(struct fat_descriptor *);
+static inline bool valid_cl(struct fat_descriptor *, cl_t);
+
 
 /*
  * Used and head bitmaps for FAT scanning.
@@ -569,7 +571,7 @@ fat_set_accessors(struct fat_descriptor *fat)
 cl_t fat_get_cl_next(struct fat_descriptor *fat, cl_t cl)
 {
 
-	if (cl < CLUST_FIRST || cl >= boot_of_(fat)->NumClusters) {
+	if (!valid_cl(fat, cl)) {
 		pfatal("Invalid cluster: %ud", cl);
 		return CLUST_DEAD;
 	}
@@ -585,7 +587,7 @@ int fat_set_cl_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 		return FSFATAL;
 	}
 
-	if (cl < CLUST_FIRST || cl >= boot_of_(fat)->NumClusters) {
+	if (!valid_cl(fat, cl)) {
 		pfatal("Invalid cluster: %ud", cl);
 		return FSFATAL;
 	}
@@ -620,8 +622,15 @@ fat_get_fd(struct fat_descriptor * fat)
 /*
  * Whether a cl is in valid data range.
  */
+bool
+fat_is_valid_cl(struct fat_descriptor *fat, cl_t cl)
+{
+
+	return (valid_cl(fat, cl));
+}
+
 static inline bool
-fat_is_cl_valid(struct fat_descriptor *fat, cl_t cl)
+valid_cl(struct fat_descriptor *fat, cl_t cl)
 {
 	const struct bootblock *boot = boot_of_(fat);
 
@@ -950,8 +959,7 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 				fat_clear_cl_head(fat, cl);
 			}
 			boot->NumBad++;
-		} else if (nextcl < CLUST_FIRST ||
-		    (nextcl >= boot->NumClusters && nextcl < CLUST_EOFS)) {
+		} else if (!valid_cl(fat, nextcl) && nextcl < CLUST_EOFS) {
 			pwarn("Cluster %u continues with %s "
 			    "cluster number %u\n",
 			    cl, (nextcl < CLUST_RSRVD) ?
@@ -1030,7 +1038,7 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 	 * as a "next" cluster, so if it's still in 'head' bitmap, it must
 	 * not be 'used'.  Assert all the three conditions.
 	 */
-	assert(fat_is_cl_valid(fat, head));
+	assert(valid_cl(fat, head));
 	assert(fat_is_cl_head(fat, head));
 	assert(!fat_is_cl_used(fat, head));
 
@@ -1058,7 +1066,7 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 	*chainsize = 0;
 	current_cl = head;
 	for (current_cl = head, next_cl = fat_get_cl_next(fat, current_cl);
-	    fat_is_cl_valid(fat, next_cl);
+	    valid_cl(fat, next_cl);
 	    current_cl = next_cl, next_cl = fat_get_cl_next(fat, current_cl)) {
 		if (fat_is_cl_used(fat, next_cl)) {
 			/*
@@ -1099,7 +1107,7 @@ clearchain(struct fat_descriptor *fat, cl_t head)
 	struct bootblock *boot = boot_of_(fat);
 
 	for (current_cl = head;
-	    fat_is_cl_valid(fat, current_cl);
+	    valid_cl(fat, current_cl);
 	    current_cl = next_cl, next_cl = fat_get_cl_next(fat, current_cl)) {
 		fat_set_cl_next(fat, current_cl, CLUST_FREE);
 		boot->NumFree++;
