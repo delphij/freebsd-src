@@ -114,7 +114,7 @@ newDosDirEntry(void)
 
 	if (!(de = freede)) {
 		if (!(de = malloc(sizeof *de)))
-			return 0;
+			return (NULL);
 	} else
 		freede = de->next;
 	return de;
@@ -191,7 +191,7 @@ fullpath(struct dosDirEntry *dir)
 /*
  * Calculate a checksum over an 8.3 alias name
  */
-static u_char
+static inline u_char
 calcShortSum(u_char *p)
 {
 	u_char sum = 0;
@@ -221,22 +221,22 @@ static struct dosDirEntry *lostDir;
 int
 resetDosDirSection(struct fat_descriptor *fat)
 {
-	int b1, b2;
+	int rootdir_size, cluster_size;
 	int ret = FSOK;
 	size_t len;
 	struct bootblock *boot;
 
 	boot = fat_get_boot(fat);
 
-	b1 = boot->bpbRootDirEnts * 32;
-	b2 = boot->bpbSecPerClust * boot->bpbBytesPerSec;
+	rootdir_size = boot->bpbRootDirEnts * 32;
+	cluster_size = boot->bpbSecPerClust * boot->bpbBytesPerSec;
 
-	if ((buffer = malloc(len = MAX(b1, b2))) == NULL) {
+	if ((buffer = malloc(len = MAX(rootdir_size, cluster_size))) == NULL) {
 		perr("No space for directory buffer (%zu)", len);
 		return FSFATAL;
 	}
 
-	if ((delbuf = malloc(len = b2)) == NULL) {
+	if ((delbuf = malloc(len = cluster_size)) == NULL) {
 		free(buffer);
 		perr("No space for directory delbuf (%zu)", len);
 		return FSFATAL;
