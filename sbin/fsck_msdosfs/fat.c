@@ -58,12 +58,11 @@ static inline bool valid_cl(struct fat_descriptor *, cl_t);
 
 
 /*
- * Used and head bitmaps for FAT scanning.
+ * Head bitmap for FAT scanning.
  *
  * FAT32 have up to 2^28 = 256M entries, and FAT16/12 have much less.
- * For each cluster, we use 1 bit to represent if it's "used"
- * (referenced by any file or directory), and another to represent if
- * it's a head cluster (the first cluster of a cluster chain).
+ * For each cluster, we use 1 bit to represent if it's a head cluster
+ * (the first cluster of a cluster chain).
  *
  * Head bitmap
  * ===========
@@ -76,20 +75,6 @@ static inline bool valid_cl(struct fat_descriptor *, cl_t);
  * not being claimed by any file or directories is the head cluster of
  * a lost chain.
  *
- * Used bitmap
- * ===========
- * Initially, we set all bits to 0.  As we traverse the directory
- * structure, we first check if the head cluster referenced by the
- * directory entry was a head cluster, and if it was, we mark the
- * whole chain as being used and clear the head map bit.
- *
- * The used bitmap have two purposes: first, we can immediately find
- * out a cross chain because the node must have been already marked
- * as used in a previous scan; second, if we do not care about lost
- * chains, the data can immediately be used for clearing the unclaimed
- * yet non-zero clusters from the FAT, similar to a "mark and sweep"
- * garbage collection.
- *
  * Handle of lost chains
  * =====================
  * At the end of scanning, we can easily find all lost chain's heads
@@ -100,18 +85,6 @@ typedef struct long_bitmap {
 	unsigned long	*map;
 	size_t		 count;		/* Total set bits in the map */
 } long_bitmap_t;
-
-static inline void
-bitmap_set(long_bitmap_t *lbp, cl_t cl)
-{
-	cl_t i = cl / LONG_BIT;
-	unsigned long setbit = 1UL << (cl % LONG_BIT);
-
-	assert((lbp->map[i] & setbit) == 0);
-	lbp->map[i] |= setbit;
-	lbp->count++;
-
-}
 
 static inline void
 bitmap_clear(long_bitmap_t *lbp, cl_t cl)
@@ -139,14 +112,6 @@ bitmap_none_in_range(long_bitmap_t *lbp, cl_t cl)
 	cl_t i = cl / LONG_BIT;
 
 	return (lbp->map[i] == 0);
-}
-
-static inline bool
-bitmap_all_set_in_range(long_bitmap_t *lbp, cl_t cl)
-{
-	cl_t i = cl / LONG_BIT;
-
-	return (~(lbp->map[i]) == 0);
 }
 
 static inline size_t
@@ -206,7 +171,6 @@ struct fat_descriptor {
 	uint8_t			*fatbuf;
 	cl_t			(*get)(struct fat_descriptor *, cl_t);
 	int			(*set)(struct fat_descriptor *, cl_t, cl_t);
-	long_bitmap_t		 usedbitmap;
 	long_bitmap_t		 headbitmap;
 	int			 fd;
 	bool			 is_mmapped;
@@ -219,30 +183,6 @@ struct fat_descriptor {
 	off_t			 fat32_offset;
 	off_t			 fat32_lastaddr;
 };
-
-void
-fat_set_cl_used(struct fat_descriptor *fat, cl_t cl)
-{
-	bitmap_set(&(fat->usedbitmap), cl);
-}
-
-void
-fat_clear_cl_used(struct fat_descriptor *fat, cl_t cl)
-{
-	bitmap_clear(&(fat->usedbitmap), cl);
-}
-
-bool
-fat_is_cl_used(struct fat_descriptor *fat, cl_t cl)
-{
-	return (bitmap_get(&(fat->usedbitmap), cl));
-}
-
-static inline bool
-fat_is_cl_allused_in_range(struct fat_descriptor *fat, cl_t cl)
-{
-	return (bitmap_all_set_in_range(&(fat->usedbitmap), cl));
-}
 
 void
 fat_clear_cl_head(struct fat_descriptor *fat, cl_t cl)
@@ -563,45 +503,6 @@ cl_t fat_get_cl_next(struct fat_descriptor *fat, cl_t cl)
 	return (fat->get(fat, cl));
 }
 
-cl_t fat_allocate_cluster(struct fat_descriptor *fat)
-{
-	cl_t cl, nextcl;
-	struct bootblock *boot;
-
-	boot = boot_of_(fat);
-
-	if (boot->NumFree == 0)
-		return (CLUST_DEAD);
-
-	boot->NumFree--;
-	if (boot->NumFree > 0) {
-		for (cl = boot->FSNext;
-		    fat_is_cl_head_in_range(fat, cl);
-		    cl++) {
-			if ((cl % LONG_BIT == 0) &&
-			    fat_is_cl_allused_in_range(fat, cl)) {
-				    cl += LONG_BIT;
-				    continue;
-			}
-			if (fat_is_cl_used(fat, cl) || fat_is_cl_head(fat, cl)) {
-				continue;
-			}
-			/*
-			 * Check if the cluster is really free (it might
-			 * belong to a lost chain, or a bad cluster).
-			 */
-			nextcl = fat_get_cl_next(fat, cl);
-			if (nextcl == CLUST_FREE) {
-				nextcl = boot->FSNext;
-				boot->FSNext = cl;
-				return (nextcl);
-			}
-		}
-	}
-
-	return (CLUST_DEAD);
-}
-
 int fat_set_cl_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 {
 
@@ -851,6 +752,7 @@ releasefat(struct fat_descriptor *fat)
 		free(fat->fatbuf);
 	}
 	fat->fatbuf = NULL;
+	bitmap_dtor(&fat->headbitmap);
 }
 
 /*
@@ -907,20 +809,10 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 		return FSFATAL;
 	}
 
-	if (bitmap_ctor(&(fat->usedbitmap), boot->NumClusters,
-	    false) != FSOK) {
-		perr("No space for used bitmap for FAT clusters (%zu)",
-		    (size_t)boot->NumClusters);
-		releasefat(fat);
-		free(fat);
-		return FSFATAL;
-	}
-
 	if (bitmap_ctor(&(fat->headbitmap), boot->NumClusters,
 	    true) != FSOK) {
 		perr("No space for head bitmap for FAT clusters (%zu)",
 		    (size_t)boot->NumClusters);
-		bitmap_dtor(&(fat->usedbitmap));
 		releasefat(fat);
 		free(fat);
 		return FSFATAL;
@@ -1118,19 +1010,15 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 	 * We expect that the caller to give us a real, unvisited 'head'
 	 * cluster, and it must be a valid cluster.  While scanning the
 	 * FAT table, we already excluded all clusters that was claimed
-	 * as a "next" cluster, so if it's still in 'head' bitmap, it must
-	 * not be 'used'.  Assert all the three conditions.
+	 * as a "next" cluster.  Assert all the three conditions.
 	 */
 	assert(valid_cl(fat, head));
 	assert(fat_is_cl_head(fat, head));
-	assert(!fat_is_cl_used(fat, head));
 
 	/*
 	 * Immediately mark the 'head' cluster that we are about to visit.
-	 * The subsequent nodes would be marked in the following loop.
 	 */
 	fat_clear_cl_head(fat, head);
-	fat_set_cl_used(fat, head);
 
 	/*
 	 * The allocation of a non-zero sized file or directory is
@@ -1150,21 +1038,8 @@ checkchain(struct fat_descriptor *fat, cl_t head, size_t *chainsize)
 	current_cl = head;
 	for (next_cl = fat_get_cl_next(fat, current_cl);
 	    valid_cl(fat, next_cl);
-	    current_cl = next_cl, next_cl = fat_get_cl_next(fat, current_cl)) {
-		if (fat_is_cl_used(fat, next_cl)) {
-			/*
-			 * We have seen this cluster somewhere else.  This can
-			 * only happen if the user choose to not fix the issue
-			 * while we scan FAT (they should have).
-			 */
-			pwarn("Cluster %u crossed a chain at %u with %u\n",
-			    head, current_cl, next_cl);
-			return (truncate_at(fat, current_cl, chainsize));
-		} else {
-			fat_set_cl_used(fat, next_cl);
-			(*chainsize)++;
-		}
-	}
+	    current_cl = next_cl, next_cl = fat_get_cl_next(fat, current_cl))
+		(*chainsize)++;
 
 	/* A natural end */
 	if (next_cl >= CLUST_EOFS) {
@@ -1195,9 +1070,6 @@ clearchain(struct fat_descriptor *fat, cl_t head)
 		next_cl = fat_get_cl_next(fat, head);
 		fat_set_cl_next(fat, current_cl, CLUST_FREE);
 		boot->NumFree++;
-		if (fat_is_cl_used(fat, current_cl)) {
-			fat_clear_cl_used(fat, current_cl);
-		}
 		current_cl = next_cl;
 	}
 
@@ -1388,6 +1260,5 @@ checklost(struct fat_descriptor *fat)
 			mod |= writefsinfo(dosfs, boot);
 	}
 
-	bitmap_dtor(&(fat->usedbitmap));
 	return mod;
 }

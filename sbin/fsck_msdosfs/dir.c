@@ -812,7 +812,7 @@ readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 							 * Only clear if we never
 							 * seen the head.
 							 */
-							if (!fat_is_cl_used(fat, dirent.head)) {
+							if (fat_is_cl_head(fat, dirent.head)) {
 								clearchain(fat, dirent.head);
 							}
 							dirent.head = 0;
@@ -1150,7 +1150,6 @@ reconnect(struct fat_descriptor *fat, cl_t head, size_t length)
 	p[29] = (u_char)(d.size >> 8);
 	p[30] = (u_char)(d.size >> 16);
 	p[31] = (u_char)(d.size >> 24);
-	fat_set_cl_used(fat, head);
 	if (lseek(dosfs, lfoff, SEEK_SET) != lfoff
 	    || (size_t)write(dosfs, lfbuf, boot->ClusterSize) != boot->ClusterSize) {
 		perr("could not write LOST.DIR");

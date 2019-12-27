@@ -91,13 +91,6 @@ int writefsinfo(int, struct bootblock *);
 /* Opaque type */
 struct fat_descriptor;
 
-/* Mark a cluster as used */
-void fat_set_cl_used(struct fat_descriptor *, cl_t);
-void fat_clear_cl_used(struct fat_descriptor *, cl_t cl);
-
-/* Whether a cluster is previously marked as used */
-bool fat_is_cl_used(struct fat_descriptor *, cl_t);
-
 void fat_clear_cl_head(struct fat_descriptor *, cl_t);
 bool fat_is_cl_head(struct fat_descriptor *, cl_t);
 
