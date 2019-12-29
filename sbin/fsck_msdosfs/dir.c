@@ -532,8 +532,9 @@ readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 	struct dosDirEntry dirent, *d;
 	u_char *p, *vallfn, *invlfn, *empty;
 	off_t off;
-	int fd, i, j, k, last;
-	cl_t cl, dircl, valcl = ~0, invcl = ~0, empcl = ~0;
+	int fd, i, j, k, iosize, entries;
+	bool is_legacyroot;
+	cl_t cl, valcl = ~0, invcl = ~0, empcl = ~0;
 	char *t;
 	u_int lidx = 0;
 	int shortSum;
@@ -553,31 +554,50 @@ readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 	}
 	shortSum = -1;
 	vallfn = invlfn = empty = NULL;
+
 	/*
-	 * Make sure we have a sane chain; mark the head as seen.
+	 * If we are checking the legacy root (for FAT12/FAT16),
+	 * we will operate on the whole directory; otherwise, we
+	 * will operate on one cluster at a time, and also take
+	 * this opportunity to examine the chain.
+	 *
+	 * Derive how many entries we are going to encounter from
+	 * the I/O size.
 	 */
-	if (dir->parent != 0 || (boot->flags & FAT32)) {
+	is_legacyroot = (dir->parent == NULL && !(boot->flags & FAT32));
+	if (is_legacyroot) {
+		iosize = boot->bpbRootDirEnts * 32;
+		entries = boot->bpbRootDirEnts;
+	} else {
+		iosize = boot->bpbSecPerClust * boot->bpbBytesPerSec;
+		entries = iosize / 32;
 		mod |= checkchain(fat, dir->head, &dirclusters);
 	}
 
 	do {
-		if (!(boot->flags & FAT32) && !dir->parent) {
-			last = boot->bpbRootDirEnts * 32;
+		if (is_legacyroot) {
+			/*
+			 * Special case for FAT12/FAT16 root -- read
+			 * in the whole root directory.
+			 */
 			off = boot->bpbResSectors + boot->bpbFATs *
 			    boot->FATsecs;
 		} else {
-			last = boot->bpbSecPerClust * boot->bpbBytesPerSec;
+			/*
+			 * Otherwise, read in a cluster of the
+			 * directory.
+			 */
 			off = (cl - CLUST_FIRST) * boot->bpbSecPerClust + boot->FirstCluster;
 		}
 
 		off *= boot->bpbBytesPerSec;
-		if (lseek(fd, off, SEEK_SET) != off
-		    || read(fd, buffer, last) != last) {
+		if (lseek(fd, off, SEEK_SET) != off ||
+		    read(fd, buffer, iosize) != iosize) {
 			perr("Unable to read directory");
 			return FSFATAL;
 		}
-		last /= 32;
-		for (p = buffer, i = 0; i < last; i++, p += 32) {
+
+		for (p = buffer, i = 0; i < entries; i++, p += 32) {
 			if (dir->fsckflags & DIREMPWARN) {
 				*p = SLOT_EMPTY;
 				continue;
@@ -785,69 +805,40 @@ readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 			vallfn = NULL; /* not used any longer */
 			invlfn = NULL;
 
-			if (dirent.flags & ATTR_DIRECTORY &&
-			    (strcmp(dirent.name, ".") == 0 ||
-			    strcmp(dirent.name, "..") == 0)) {
-				/*
-				 * These are already checked when scanning the parent,
-				 * so explicitly skip.
-				 */
-			} else {
-				if (fat_is_valid_cl(fat, dirent.head)) {
-					dircl = fat_get_cl_next(fat,
-					    dirent.head);
-				} else {
-					dircl = 0;
-				}
-
-				if (dirent.size == 0 && !(dirent.flags & ATTR_DIRECTORY)) {
-					if (dirent.head != 0) {
-						pwarn("%s has clusters, but size 0\n",
-						fullpath(&dirent));
-						if (ask(1, "Drop allocated clusters")) {
-							p[26] = p[27] = 0;
-							if (boot->ClustMask == CLUST32_MASK)
-								p[20] = p[21] = 0;
-							/*
-							 * Only clear if we never
-							 * seen the head.
-							 */
-							if (fat_is_cl_head(fat, dirent.head)) {
-								clearchain(fat, dirent.head);
-							}
-							dirent.head = 0;
-							mod |= THISMOD|FSDIRMOD|FSFATMOD;
-						} else
-							mod |= FSERROR;
-					}
-				} else if (dirent.head == 0
-					&& !strcmp(dirent.name, "..")
-					&& dir->parent			/* XXX */
-					&& !dir->parent->parent) {
-					/*
-					*  Do nothing, the parent is the root
-					*/
-				} else if (!fat_is_valid_cl(fat, dirent.head)
-					|| dircl == CLUST_FREE
-					|| (dircl >= CLUST_RSRVD && dircl < CLUST_EOFS)
-					|| (strcmp(dirent.name, ".") != 0 && !fat_is_cl_head(fat, dirent.head))) {
-					if (dirent.head == 0)
-						pwarn("%s has no clusters\n",
-						fullpath(&dirent));
-					else if (!fat_is_valid_cl(fat, dirent.head))
+			/*
+			 * Check if the directory entry is sane.
+			 *
+			 * '.' and '..' are skipped, their sanity is
+			 * checked somewhere else.
+			 *
+			 * For everything else, check if we have a new,
+			 * valid cluster chain (beginning of a file or
+			 * directory that was never previously claimed
+			 * by another file) when it's a non-empty file
+			 * or a directory. The sanity of the cluster
+			 * chain is checked at a later time when we
+			 * traverse into the directory, or examine the
+			 * file's directory entry.
+			 *
+			 * The only possible fix is to delete the entry
+			 * if it's a directory; for file, we have to
+			 * truncate the size to 0.
+			 */
+			if (!(dirent.flags & ATTR_DIRECTORY) ||
+			    (strcmp(dirent.name, ".") != 0 &&
+			    strcmp(dirent.name, "..") != 0)) {
+				if ((dirent.size != 0 || (dirent.flags & ATTR_DIRECTORY)) &&
+				    ((!fat_is_valid_cl(fat, dirent.head) ||
+				    !fat_is_cl_head(fat, dirent.head)))) {
+					if (!fat_is_valid_cl(fat, dirent.head)) {
 						pwarn("%s starts with cluster out of range(%u)\n",
-						fullpath(&dirent),
-						dirent.head);
-					else if (dircl == CLUST_FREE)
-						pwarn("%s starts with free cluster\n",
-						fullpath(&dirent));
-					else if (dircl >= CLUST_RSRVD && dircl < CLUST_EOFS)
-						pwarn("%s starts with cluster marked %s\n",
-						fullpath(&dirent),
-						rsrvdcltype(dircl));
-					else
-						pwarn("%s doesn't start a cluster chain\n",
-						fullpath(&dirent));
+						    fullpath(&dirent),
+						    dirent.head);
+					} else {
+						pwarn("%s doesn't start a new cluster chain\n",
+						    fullpath(&dirent));
+					}
+
 					if (dirent.flags & ATTR_DIRECTORY) {
 						if (ask(0, "Remove")) {
 							*p = SLOT_DELETED;
@@ -905,8 +896,7 @@ readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 							mod |= FSERROR;
 					}
 					continue;
-				}
-				if (strcmp(dirent.name, "..") == 0) {
+				} else if (strcmp(dirent.name, "..") == 0) {
 					if (dir->parent) {		/* XXX */
 						if (!dir->parent->parent) {
 							if (dirent.head) {
@@ -995,13 +985,16 @@ readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 			boot->NumFiles++;
 		}
 
-		if (!(boot->flags & FAT32) && !dir->parent)
+		if (is_legacyroot) {
+			/*
+			 * Don't bother to write back right now because
+			 * we may continue to make modification to the
+			 * non-FAT32 root directory below.
+			 */
 			break;
-
-		if (mod & THISMOD) {
-			last *= 32;
+		} else if (mod & THISMOD) {
 			if (lseek(fd, off, SEEK_SET) != off
-			    || write(fd, buffer, last) != last) {
+			    || write(fd, buffer, iosize) != iosize) {
 				perr("Unable to write directory");
 				return FSFATAL;
 			}
@@ -1014,13 +1007,14 @@ readDosDirSection(struct fat_descriptor *fat, struct dosDirEntry *dir)
 				invlfn ? invcl : valcl, -1, 0,
 				fullpath(dir), 1);
 
-	/* The root directory of non fat32 filesystems is in a special
-	 * area and may have been modified above without being written out.
+	/*
+	 * The root directory of non-FAT32 filesystems is in a special
+	 * area and may have been modified above removede() without
+	 * being written out.
 	 */
-	if ((mod & FSDIRMOD) && !(boot->flags & FAT32) && !dir->parent) {
-		last *= 32;
+	if ((mod & FSDIRMOD) && is_legacyroot) {
 		if (lseek(fd, off, SEEK_SET) != off
-		    || write(fd, buffer, last) != last) {
+		    || write(fd, buffer, iosize) != iosize) {
 			perr("Unable to write directory");
 			return FSFATAL;
 		}
