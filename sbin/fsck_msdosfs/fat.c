@@ -1118,7 +1118,7 @@ copyfat(struct fat_descriptor *fat, int n)
 			(size_t)write(fd, fat->fatbuf, rwsize) != rwsize) &&
 			ret == FSOK) {
 			perr("Unable to write FAT %d", n);
-			ret = FSFATAL;
+			ret = FSERROR;
 		}
 	}
 	return (ret);
@@ -1173,7 +1173,7 @@ writefat(struct fat_descriptor *fat)
 			    (size_t)write(fd, fat->fatbuf, writesz) != writesz) &&
 			    ret == FSOK) {
 				perr("Unable to write FAT %d", i);
-				ret = (i == 0) ? FSFATAL : FSERROR;
+				ret = ((i == 0) ? FSFATAL : FSERROR);
 			}
 		}
 	}
