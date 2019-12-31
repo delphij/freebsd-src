@@ -187,25 +187,25 @@ struct fat_descriptor {
 void
 fat_clear_cl_head(struct fat_descriptor *fat, cl_t cl)
 {
-	bitmap_clear(&(fat->headbitmap), cl);
+	bitmap_clear(&fat->headbitmap, cl);
 }
 
 bool
 fat_is_cl_head(struct fat_descriptor *fat, cl_t cl)
 {
-	return (bitmap_get(&(fat->headbitmap), cl));
+	return (bitmap_get(&fat->headbitmap, cl));
 }
 
 static inline bool
 fat_is_cl_head_in_range(struct fat_descriptor *fat, cl_t cl)
 {
-	return (!(bitmap_none_in_range(&(fat->headbitmap), cl)));
+	return (!(bitmap_none_in_range(&fat->headbitmap, cl)));
 }
 
 static size_t
 fat_get_head_count(struct fat_descriptor *fat)
 {
-	return (bitmap_count(&(fat->headbitmap)));
+	return (bitmap_count(&fat->headbitmap));
 }
 
 /*
@@ -486,9 +486,9 @@ fat_set_fat32_cached_next(struct fat_descriptor *fat, cl_t cl, cl_t nextcl)
 	p = fat_get_fat32_cached_ptr(fat, cl, true);
 	if (p != NULL) {
 		le32enc(p, (uint32_t)nextcl);
-		return (0);
+		return FSOK;
 	} else {
-		return (1);
+		return FSFATAL;
 	}
 }
 
@@ -809,7 +809,7 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 		return FSFATAL;
 	}
 
-	if (bitmap_ctor(&(fat->headbitmap), boot->NumClusters,
+	if (bitmap_ctor(&fat->headbitmap, boot->NumClusters,
 	    true) != FSOK) {
 		perr("No space for head bitmap for FAT clusters (%zu)",
 		    (size_t)boot->NumClusters);
@@ -942,7 +942,7 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 				"out of range" : "reserved",
 			    nextcl & boot->ClustMask);
 			if (ask(0, "Truncate")) {
-				fat_set_cl_next(fat, cl, CLUST_EOF);
+				ret |= fat_set_cl_next(fat, cl, CLUST_EOF);
 				ret |= FSFATMOD;
 			}
 		} else if (nextcl < boot->NumClusters) {
@@ -952,7 +952,7 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 				pwarn("Cluster %u crossed another chain at %u\n",
 				    cl, nextcl);
 				if (ask(0, "Truncate")) {
-					fat_set_cl_next(fat, cl, CLUST_EOF);
+					ret |= fat_set_cl_next(fat, cl, CLUST_EOF);
 					ret |= FSFATMOD;
 				}
 			}
@@ -990,10 +990,12 @@ rsrvdcltype(cl_t cl)
 static inline int
 truncate_at(struct fat_descriptor *fat, cl_t current_cl, size_t *chainsize)
 {
+	int ret = 0;
+
 	if (ask(0, "Truncate")) {
-		fat_set_cl_next(fat, current_cl, CLUST_EOF);
+		ret = fat_set_cl_next(fat, current_cl, CLUST_EOF);
 		(*chainsize)++;
-		return FSFATMOD;
+		return (ret | FSFATMOD);
 	} else {
 		return FSERROR;
 	}
@@ -1069,7 +1071,7 @@ clearchain(struct fat_descriptor *fat, cl_t head)
 
 	while (valid_cl(fat, current_cl)) {
 		next_cl = fat_get_cl_next(fat, head);
-		fat_set_cl_next(fat, current_cl, CLUST_FREE);
+		(void)fat_set_cl_next(fat, current_cl, CLUST_FREE);
 		boot->NumFree++;
 		current_cl = next_cl;
 	}

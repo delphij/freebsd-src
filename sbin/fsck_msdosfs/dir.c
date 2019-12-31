@@ -437,8 +437,8 @@ checksize(struct fat_descriptor *fat, u_char *p, struct dosDirEntry *dir)
 			    (sz += boot->ClusterSize) < dir->size; len++)
 				cl = fat_get_cl_next(fat, cl);
 			clearchain(fat, fat_get_cl_next(fat, cl));
-			fat_set_cl_next(fat, cl, CLUST_EOF);
-			return FSFATMOD;
+			ret = fat_set_cl_next(fat, cl, CLUST_EOF);
+			return (FSFATMOD | ret);
 		} else
 			return FSERROR;
 	}
