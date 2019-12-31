@@ -87,7 +87,7 @@ checkfilesys(const char *fname)
 	}
 
 	if (!preen)  {
-		printf("** Phase 1 - Read FAT\n");
+		printf("** Phase 1 - Read FAT and checking connectivity\n");
 	}
 
 	mod |= readfat(dosfs, &boot, &fat);
@@ -117,7 +117,7 @@ checkfilesys(const char *fname)
 		goto out;
 
 	/* now write the FATs */
-	if (mod & (FSFATMOD|FSFIXFAT)) {
+	if (mod & FSFATMOD) {
 		if (ask(1, "Update FATs")) {
 			mod |= writefat(fat);
 			if (mod & FSFATAL)

@@ -367,7 +367,7 @@ fat_flush_fat32_cache_entry(struct fat_descriptor *fat,
 	fd = fd_of_(fat);
 
 	if (!entry->dirty)
-		return (0);
+		return (FSOK);
 
 	writesize = fat_get_iosize(fat, entry->addr);
 
@@ -375,11 +375,11 @@ fat_flush_fat32_cache_entry(struct fat_descriptor *fat,
 	if (lseek(fd, fat_addr, SEEK_SET) != fat_addr ||
 	    (size_t)write(fd, entry->chunk, writesize) != writesize) {
 			pfatal("Unable to write FAT");
-			return (1);
+			return (FSFATAL);
 	}
 
 	entry->dirty = false;
-	return (0);
+	return (FSOK);
 }
 
 static struct fat32_cache_entry *
@@ -418,7 +418,7 @@ fat_get_fat32_cache_entry(struct fat_descriptor *fat, off_t addr,
 	 */
 	entry = TAILQ_LAST(&fat->fat32_cache_head, cachehead);
 	TAILQ_REMOVE(&fat->fat32_cache_head, entry, entries);
-	if (fat_flush_fat32_cache_entry(fat, entry) != 0) {
+	if (fat_flush_fat32_cache_entry(fat, entry) != FSOK) {
 		return (NULL);
 	}
 
@@ -863,6 +863,7 @@ readfat(int fs, struct bootblock *boot, struct fat_descriptor **fp)
 			}
 
 			if (ask(1, "Correct")) {
+				ret |= FSFATMOD;
 				p = buffer;
 
 				*p++ = (u_char)boot->bpbMedia;
@@ -1141,10 +1142,13 @@ writefat(struct fat_descriptor *fat)
 
 	if (fat->use_cache) {
 		/*
-		 * Flush all in-flight cache.
+		 * Attempt to flush all in-flight cache, and bail out
+		 * if we encountered an error (but only emit error
+		 * message once).  Stop proceeding with copyfat()
+		 * if any flush failed.
 		 */
 		TAILQ_FOREACH(entry, &fat->fat32_cache_head, entries) {
-			if (fat_flush_fat32_cache_entry(fat, entry) != 0) {
+			if (fat_flush_fat32_cache_entry(fat, entry) != FSOK) {
 				if (ret == FSOK) {
 					perr("Unable to write FAT");
 					ret = FSFATAL;
@@ -1154,9 +1158,10 @@ writefat(struct fat_descriptor *fat)
 		if (ret != FSOK)
 			return (ret);
 
+		/* Update backup copies of FAT, error is not fatal */
 		for (i = 1; i < boot->bpbFATs; i++) {
 			if (copyfat(fat, i) != FSOK)
-				ret = FSFATAL;
+				ret = FSERROR;
 		}
 	} else {
 		writesz = fat->fatsize;
@@ -1168,7 +1173,7 @@ writefat(struct fat_descriptor *fat)
 			    (size_t)write(fd, fat->fatbuf, writesz) != writesz) &&
 			    ret == FSOK) {
 				perr("Unable to write FAT %d", i);
-				ret = FSFATAL;
+				ret = (i == 0) ? FSFATAL : FSERROR;
 			}
 		}
 	}
