@@ -185,6 +185,7 @@ g_eli_find_device(struct g_class *mp, const char *prov)
 	struct g_geom *gp;
 	struct g_provider *pp;
 	struct g_consumer *cp;
+	struct g_geom_alias *gap;
 
 	if (strncmp(prov, _PATH_DEV, strlen(_PATH_DEV)) == 0)
 		prov += strlen(_PATH_DEV);
@@ -193,12 +194,22 @@ g_eli_find_device(struct g_class *mp, const char *prov)
 		if (sc == NULL)
 			continue;
 		pp = LIST_FIRST(&gp->provider);
-		if (pp != NULL && strcmp(pp->name, prov) == 0)
-			return (sc);
+		if (pp != NULL) {
+			if (strcmp(pp->name, prov) == 0)
+				return (sc);
+			LIST_FOREACH(gap, &pp->aliases, ga_next) {
+				if (strcmp(gap->ga_alias, prov) == 0)
+					return (sc);
+			}
+		}
 		cp = LIST_FIRST(&gp->consumer);
-		if (cp != NULL && cp->provider != NULL &&
-		    strcmp(cp->provider->name, prov) == 0) {
-			return (sc);
+		if (cp != NULL && cp->provider != NULL) {
+			if (strcmp(cp->provider->name, prov) == 0)
+				return (sc);
+			LIST_FOREACH(gap, &cp->provider->aliases, ga_next) {
+				if (strcmp(gap->ga_alias, prov) == 0)
+					return (sc);
+			}
 		}
 	}
 	return (NULL);

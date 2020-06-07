@@ -766,6 +766,7 @@ g_provider_by_name(char const *arg)
 	struct g_class *cp;
 	struct g_geom *gp;
 	struct g_provider *pp, *wpp;
+	struct g_geom_alias *gap;
 
 	if (strncmp(arg, _PATH_DEV, sizeof(_PATH_DEV) - 1) == 0)
 		arg += sizeof(_PATH_DEV) - 1;
@@ -774,7 +775,11 @@ g_provider_by_name(char const *arg)
 	LIST_FOREACH(cp, &g_classes, class) {
 		LIST_FOREACH(gp, &cp->geom, geom) {
 			LIST_FOREACH(pp, &gp->provider, provider) {
-				if (strcmp(arg, pp->name) != 0)
+				LIST_FOREACH(gap, &pp->aliases, ga_next) {
+					if (strcmp(arg, gap->ga_alias) == 0)
+						break;
+				}
+				if (gap == NULL && strcmp(arg, pp->name) != 0)
 					continue;
 				if ((gp->flags & G_GEOM_WITHER) == 0 &&
 				    (pp->flags & G_PF_WITHER) == 0)
