@@ -64,6 +64,48 @@ This document provides essential context for AI models collaborating with the Fr
 
   * The `/tests` suite uses `kyua(1)` and `atf(7)`.
   * Kernel and userland testing is mandatory for critical paths.
+
+### Adding Tests for Existing Utilities for the first time
+
+When introducing a new `tests/` directory for a utility that previously had none, follow these steps to integrate with FreeBSD’s testing infrastructure:
+
+1. **mtree Update**
+
+   * Update `etc/mtree/BSD.tests.dist` to register the new test directory and ensure it is installed under `/usr/tests`.
+   * Place the new directory alphabetically among peers.
+
+2. **Utility Makefile Update**
+
+   * Add `HAS_TESTS=` to indicate the utility now has tests.
+   * Add `SUBDIR.${MK_TESTS}= tests`.
+   * Ensure `.include <src.opts.mk>` appears before these lines to properly handle `MK_TESTS` build knobs.
+
+3. **Test Directory Setup**
+
+   * Create a new `tests/` subdirectory alongside the utility source.
+   * Add a `Makefile` that declares the test programs or scripts, e.g.:
+
+     ```make
+     ATF_TESTS_SH= utility_name
+     .include <bsd.test.mk>
+     ```
+   * For C tests, use `ATF_TESTS_C= …`.
+
+4. **Test Script Standards**
+
+   * Write ATF-based test cases (`atf_test_case`, `atf_init_test_cases`).
+   * Provide meaningful `descr` text via `atf_set descr`.
+   * Add SPDX license identifier (e.g., `# SPDX-License-Identifier: BSD-2-Clause` or `ISC`) and appropriate copyright/permission notices.
+   * It is acceptable to copy the format from existing tests under `/usr/tests`, or a nearby utility's `tests/` subfolder.
+
+5. **Test Quality Practices**
+
+   * Keep tests deterministic — avoid relying on non-deterministic behavior, random data, or system state.
+   * Prefer small, focused tests that validate specific options or behaviors.
+   * Use `atf_check` with `diff` or explicit `stdout/stderr` checks to validate output.
+   * Cover both expected success and failure modes (positive and negative tests).
+   * Reuse existing test helper utilities in `/usr/tests` if possible, instead of creating redundant scripts.
+
 * **CI/CD:** Pull requests and commits are validated by Cirrus CI. Developers are encouraged to test locally with `kyua` before submission.
 * **Code Review:** All non-trivial changes should be reviewed through [FreeBSD Phabricator](https://reviews.freebsd.org/) (preferred) or mailing lists.
 
