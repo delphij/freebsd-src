@@ -1195,6 +1195,8 @@
         ..
         renice
         ..
+        rev
+        ..
         rs
         ..
         sdiff

@@ -50,11 +50,16 @@ main(int argc, char *argv[])
 	FILE *fp;
 	size_t len;
 	int ch, rval;
+	wchar_t sep;
 
 	setlocale(LC_ALL, "");
 
-	while ((ch = getopt(argc, argv, "")) != -1)
+	sep = '\n';
+	while ((ch = getopt(argc, argv, "0")) != -1)
 		switch(ch) {
+		case '0':
+			sep = '\0';
+			break;
 		case '?':
 		default:
 			usage();
@@ -76,12 +81,44 @@ main(int argc, char *argv[])
 			}
 			filename = *argv++;
 		}
-		while ((p = fgetwln(fp, &len)) != NULL) {
-			if (p[len - 1] == '\n')
-				--len;
-			for (t = p + len - 1; t >= p; --t)
-				putwchar(*t);
-			putwchar('\n');
+		if (sep == '\n') {
+			while ((p = fgetwln(fp, &len)) != NULL) {
+				if (p[len - 1] == '\n')
+					--len;
+				for (t = p + len - 1; t >= p; --t)
+					putwchar(*t);
+				putwchar('\n');
+			}
+		} else {
+			wchar_t *buf = NULL;
+			size_t bufsize = 0;
+			wint_t wc;
+
+			len = 0;
+			while ((wc = fgetwc(fp)) != WEOF) {
+				if (wc == sep) {
+					if (len > 0) {
+						for (t = buf + len - 1; t >= buf; --t)
+							putwchar(*t);
+					}
+					putwchar(sep);
+					len = 0;
+				} else {
+					if (len >= bufsize) {
+						bufsize = bufsize ? bufsize * 2 : 1024;
+						buf = reallocarray(buf, bufsize, sizeof(wchar_t));
+						if (buf == NULL)
+							err(1, NULL);
+					}
+					buf[len++] = wc;
+				}
+			}
+			if (len > 0) {
+				for (t = buf + len - 1; t >= buf; --t)
+					putwchar(*t);
+				putwchar(sep);
+			}
+			free(buf);
 		}
 		if (ferror(fp)) {
 			warn("%s", filename);
@@ -96,6 +133,6 @@ main(int argc, char *argv[])
 void
 usage(void)
 {
-	(void)fprintf(stderr, "usage: rev [file ...]\n");
+	(void)fprintf(stderr, "usage: rev [-0] [file ...]\n");
 	exit(1);
 }

@@ -33,6 +33,7 @@
 .Nd reverse lines of a file
 .Sh SYNOPSIS
 .Nm
+.Op Fl 0
 .Op Ar
 .Sh DESCRIPTION
 The
@@ -40,6 +41,15 @@ The
 utility copies the specified files to the standard output, reversing the
 order of characters in every line.
 If no files are specified, the standard input is read.
+.Pp
+The following options are available:
+.Bl -tag -width indent
+.It Fl 0
+Use NUL
+.Pq Ql \e0
+as the line separator instead of newline
+.Pq Ql \en .
+.El
 .Sh EXAMPLES
 Reverse the text from stdin:
 .Bd -literal -offset indent
