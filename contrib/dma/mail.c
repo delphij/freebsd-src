@@ -43,6 +43,7 @@
 #include <unistd.h>
 
 #include "dma.h"
+#include "rfc2047.h"
 
 #define MAX_LINE_RFC822	999 /* 998 characters plus \n */
 
@@ -347,10 +348,39 @@ newaddr:
 }
 
 static int
-writeline(struct queue *queue, const char *line, ssize_t linelen)
+writeline(struct queue *queue, const char *line, ssize_t linelen, int is_header)
 {
 	ssize_t len;
+	char *folded = NULL;
 
+	/* For headers, check if we need RFC 2047 encoding or folding */
+	if (is_header && linelen > 0) {
+		/*
+		 * Check if this looks like a header with non-ASCII or
+		 * if it's already too long and needs folding.
+		 */
+		if (needs_rfc2047_encoding(line) || linelen > MAX_LINE_RFC822) {
+			/*
+			 * If there's a colon, assume it's a complete header line
+			 * and fold it properly. Otherwise, write as-is.
+			 */
+			if (strchr(line, ':') != NULL) {
+				folded = rfc2047_fold_header(line);
+				if (folded != NULL) {
+					len = strlen(folded);
+					if (fwrite(folded, len, 1, queue->mailf) != 1) {
+						free(folded);
+						return (-1);
+					}
+					free(folded);
+					return (0);
+				}
+				/* If folding failed, fall through to default handling */
+			}
+		}
+	}
+
+	/* Default handling for body or simple headers */
 	while (linelen > 0) {
 		len = linelen;
 		if (linelen > MAX_LINE_RFC822) {
@@ -363,7 +393,11 @@ writeline(struct queue *queue, const char *line, ssize_t linelen)
 		if (linelen <= MAX_LINE_RFC822)
 			break;
 
-		if (fwrite("\n", 1, 1, queue->mailf) != 1)
+		/*
+		 * For continuation lines, add proper folding whitespace
+		 * (newline + space) per RFC 5322.
+		 */
+		if (fwrite("\n ", 2, 1, queue->mailf) != 1)
 			return (-1);
 
 		line += MAX_LINE_RFC822 - 10;
@@ -439,12 +473,10 @@ readmail(struct queue *queue, int nodot, int recp_from_header)
 			had_first_line = 1;
 		}
 		if (!had_headers) {
-			if (linelen > MAX_LINE_RFC822) {
-				/* XXX also split headers */
-				errlogx(EX_DATAERR, "bad mail input format:"
-				    " from %s (uid %d) (envelope-from %s)",
-				    username, useruid, queue->sender);
-			}
+			/*
+			 * Long headers will now be handled automatically by
+			 * writeline() with RFC 2047 encoding and proper folding.
+			 */
 			/*
 			 * Unless this is a continuation, switch of
 			 * the Bcc: nocopy flag.
@@ -510,7 +542,8 @@ readmail(struct queue *queue, int nodot, int recp_from_header)
 				if (fwrite(newline, strlen(newline), 1, queue->mailf) != 1)
 					goto fail;
 			} else {
-				if (writeline(queue, line, linelen) != 0)
+				/* Pass is_header flag: 1 if we haven't finished headers yet */
+				if (writeline(queue, line, linelen, !had_headers) != 0)
 					goto fail;
 			}
 		}
