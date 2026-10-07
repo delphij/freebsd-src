@@ -200,6 +200,14 @@ struct re_guts {
 #define	IGN	(CHAR_MIN - 2)
 
 /*
+ * A value of wchar_t that does not fit a non-negative wint_t, as an
+ * unsigned wchar_t or an encoding that sets the top bit can produce, is
+ * taken for one of the negative pseudo-characters of the engine, and
+ * the sets would index with it: no such value is a character here.
+ */
+#define	ISCHAR(wc)	((wint_t)(wc) >= 0)
+
+/*
  * Tell whether a character is part of a word.  The pseudo-characters of
  * the engine are negative.
  */

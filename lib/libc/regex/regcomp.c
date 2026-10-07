@@ -1296,9 +1296,9 @@ p_b_coll_elem(struct parse *p,
 		if (strncmp(cp->name, sp, len) == 0 && strlen(cp->name) == len)
 			return(cp->code);	/* known name */
 	memset(&mbs, 0, sizeof(mbs));
-	if ((clen = mbrtowc(&wc, sp, len, &mbs)) == len)
+	if ((clen = mbrtowc(&wc, sp, len, &mbs)) == len && ISCHAR(wc))
 		return (wc);			/* single character */
-	else if (clen == (size_t)-1 || clen == (size_t)-2)
+	else if (clen == (size_t)-1 || clen == (size_t)-2 || clen == len)
 		SETERROR(REG_ILLSEQ);
 	else
 		SETERROR(REG_ECOLLATE);		/* neither */
@@ -1534,7 +1534,7 @@ wgetnext(struct parse *p)
 
 	memset(&mbs, 0, sizeof(mbs));
 	n = mbrtowc(&wc, p->next, p->end - p->next, &mbs);
-	if (n == (size_t)-1 || n == (size_t)-2) {
+	if (n == (size_t)-1 || n == (size_t)-2 || !ISCHAR(wc)) {
 		SETERROR(REG_ILLSEQ);
 		return (0);
 	}
