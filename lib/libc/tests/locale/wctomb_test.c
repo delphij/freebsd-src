@@ -44,13 +44,22 @@
 ATF_TC_WITHOUT_HEAD(euccs1_test);
 ATF_TC_BODY(euccs1_test, tc)
 {
-	wchar_t wc = 0x8e000000;
 	char buf[MB_LEN_MAX];
 
 	ATF_REQUIRE(strcmp(setlocale(LC_CTYPE, "zh_CN.eucCN"),
 	    "zh_CN.eucCN") == 0);
 
-	ATF_REQUIRE(wctomb(&buf[0], wc) == 4);
+	/* A character of code set 1 (GB 2312) is two bytes. */
+	ATF_REQUIRE(wctomb(&buf[0], 0xd6d0) == 2);
+	ATF_REQUIRE((unsigned char)buf[0] == 0xd6 &&
+	    (unsigned char)buf[1] == 0xd0);
+
+	/*
+	 * EUC-CN has no code set 2 any more: it was four bytes with the
+	 * single shift in the top byte of the wide character, which made
+	 * the value negative.
+	 */
+	ATF_REQUIRE(wctomb(&buf[0], 0x8e000000) == -1);
 }
 
 ATF_TC_WITHOUT_HEAD(wctomb_test);

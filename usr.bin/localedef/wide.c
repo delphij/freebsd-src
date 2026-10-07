@@ -527,14 +527,14 @@ towide_euc_impl(wchar_t *wc, const char *mb, unsigned n,
  * EUC-CN encodes as follows:
  *
  * Code set 0 (ASCII):				0x21-0x7E
- * Code set 1 (CNS 11643-1992 Plane 1):		0xA1A1-0xFEFE
+ * Code set 1 (GB 2312):				0xA1A1-0xFEFE
  * Code set 2:					unused
  * Code set 3:					unused
  */
 int
 towide_euccn(wchar_t *wc, const char *mb, unsigned n)
 {
-	return (towide_euc_impl(wc, mb, n, 0x8e, 4, 0, 0));
+	return (towide_euc_impl(wc, mb, n, 0, 0, 0, 0));
 }
 
 /*

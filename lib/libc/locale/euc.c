@@ -116,7 +116,10 @@ _EUC_mbsinit(const mbstate_t *ps)
 }
 
 /*
- * EUC-CN uses CS0, CS1 and CS2 (4 bytes).
+ * EUC-CN uses only CS0 and CS1.  It once had a CS2 of four bytes, with
+ * the single shift byte kept in the wide character, which left no room
+ * for the sign: such a character was negative, which nothing that takes
+ * a wchar_t is prepared for.
  */
 int
 _EUC_CN_init(struct xlocale_ctype *l, _RuneLocale *rl)
@@ -128,7 +131,7 @@ _EUC_CN_init(struct xlocale_ctype *l, _RuneLocale *rl)
 	l->__mbsinit = _EUC_mbsinit;
 
 	l->runes = rl;
-	l->__mb_cur_max = 4;
+	l->__mb_cur_max = 2;
 	l->__mb_sb_limit = 128;
 	return (0);
 }
@@ -137,7 +140,7 @@ static size_t
 _EUC_CN_mbrtowc(wchar_t * __restrict pwc, const char * __restrict s,
     size_t n, mbstate_t * __restrict ps)
 {
-	return (_EUC_mbrtowc_impl(pwc, s, n, ps, SS2, 4, 0, 0));
+	return (_EUC_mbrtowc_impl(pwc, s, n, ps, 0, 0, 0, 0));
 }
 
 static size_t
@@ -152,7 +155,7 @@ static size_t
 _EUC_CN_wcrtomb(char * __restrict s, wchar_t wc,
     mbstate_t * __restrict ps)
 {
-	return (_EUC_wcrtomb_impl(s, wc, ps, SS2, 4, 0, 0));
+	return (_EUC_wcrtomb_impl(s, wc, ps, 0, 0, 0, 0));
 }
 
 static size_t

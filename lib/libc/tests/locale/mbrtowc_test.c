@@ -28,8 +28,8 @@
  * Test program for mbrtowc(), as specified by IEEE Std. 1003.1-2001 and
  * ISO/IEC 9899:1999.
  *
- * The function is tested with both the "C" ("POSIX") LC_CTYPE setting and
- * "ja_JP.eucJP". Other encodings are not tested.
+ * The function is tested with the "C" ("POSIX") LC_CTYPE setting,
+ * "ja_JP.eucJP" and "zh_CN.eucCN". Other encodings are not tested.
  */
 
 #include <errno.h>
@@ -151,6 +151,40 @@ ATF_TC_BODY(mbrtowc_test, tc)
 	buf[0] = 0xc1;
 	ATF_REQUIRE(mbrtowc(&wc, buf, 1, &s) == 1);
 	ATF_REQUIRE(wc == 0xa3c1);
+
+	/*
+	 * Chinese (EUC) locale: ASCII and two-byte characters only.
+	 */
+
+	ATF_REQUIRE(strcmp(setlocale(LC_CTYPE, "zh_CN.eucCN"), "zh_CN.eucCN") == 0);
+	ATF_REQUIRE(MB_CUR_MAX == 2);
+
+	/* Latin letter A. */
+	buf[0] = 'A';
+	memset(&s, 0, sizeof(s));
+	ATF_REQUIRE(mbrtowc(&wc, buf, 1, &s) == 1);
+	ATF_REQUIRE(wc == L'A');
+
+	/* A two-byte character of GB 2312. */
+	buf[0] = 0xd6;
+	buf[1] = 0xd0;
+	memset(&s, 0, sizeof(s));
+	wc = 0;
+	ATF_REQUIRE(mbrtowc(&wc, buf, 2, &s) == 2);
+	ATF_REQUIRE(wc == 0xd6d0);
+
+	/*
+	 * A single shift 2 is not valid: it once started a four-byte
+	 * character whose wide value had the sign bit set.
+	 */
+	buf[0] = 0x8e;
+	buf[1] = 0xa1;
+	buf[2] = 0xa1;
+	buf[3] = 0xa1;
+	memset(&s, 0, sizeof(s));
+	errno = 0;
+	ATF_REQUIRE(mbrtowc(&wc, buf, 4, &s) == (size_t)-1);
+	ATF_REQUIRE(errno == EILSEQ);
 }
 
 ATF_TP_ADD_TCS(tp)
