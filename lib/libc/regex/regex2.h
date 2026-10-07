@@ -198,4 +198,14 @@ struct re_guts {
 /* misc utilities */
 #define	OUT	(CHAR_MIN - 1)	/* a non-character value */
 #define	IGN	(CHAR_MIN - 2)
-#define ISWORD(c)       (iswalnum((uch)(c)) || (c) == '_')
+
+/*
+ * Tell whether a character is part of a word.  The pseudo-characters of
+ * the engine are negative.
+ */
+static __inline int
+ISWORD(wint_t c)
+{
+
+	return (c >= 0 && (iswalnum(c) || c == '_'));
+}

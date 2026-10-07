@@ -760,4 +760,11 @@ behavior in such cases should not be relied on.
 The implementation of word-boundary matching is a bit of a kludge,
 and bugs may lurk in combinations of word-boundary matching and anchoring.
 .Pp
-Word-boundary matching does not work properly in multibyte locales.
+A search that starts inside the string, with
+.Dv REG_STARTEND
+and
+.Dv REG_NOTBOL ,
+reads the character before its start backwards, which can take the
+trailing byte of a character for a character of its own in encodings
+where both can be the same byte, such as SJIS, Big5, GBK and GB18030,
+and so misjudge a word boundary at the start.

@@ -44,6 +44,8 @@
 
 #ifdef SNAMES
 #define	stepback sstepback
+#define	charat	scharat
+#define	charbefore scharbefore
 #define	matcher	smatcher
 #define	walk	swalk
 #define	dissect	sdissect
@@ -55,6 +57,8 @@
 #endif
 #ifdef LNAMES
 #define	stepback lstepback
+#define	charat	lcharat
+#define	charbefore lcharbefore
 #define	matcher	lmatcher
 #define	walk	lwalk
 #define	dissect	ldissect
@@ -66,6 +70,8 @@
 #endif
 #ifdef MNAMES
 #define	stepback mstepback
+#define	charat	mcharat
+#define	charbefore mcharbefore
 #define	matcher	mmatcher
 #define	walk	mwalk
 #define	dissect	mdissect
@@ -85,6 +91,9 @@ struct match {
 	const char *beginp;	/* start of string -- virtual NUL precedes */
 	const char *endp;	/* end of string -- virtual NUL here */
 	const char *coldp;	/* can be no match starting before here */
+	wint_t coldc;		/* the character before coldp, as walked */
+	const char *curp;	/* where walking on from coldp has got to */
+	wint_t curc;		/* the character before curp */
 	const char **lastpos;	/* [nplus+1] */
 	STATEVARS;
 	states st;		/* current states */
@@ -166,7 +175,9 @@ stepback(const char *start, const char *cur, int nchar)
 				return (NULL);
 			memset(&mbs, 0, sizeof(mbs));
 			clen = mbrtowc(NULL, ret - mbc, mbc, &mbs);
-			if (clen != (size_t)-1 && clen != (size_t)-2)
+			if (clen == 0)
+				clen = 1;
+			if (clen == (size_t)mbc)
 				break;
 		}
 		if (mbc > MB_CUR_MAX)
@@ -175,6 +186,66 @@ stepback(const char *start, const char *cur, int nchar)
 	}
 
 	return (ret);
+}
+
+/*
+ - charat - the character that starts at a position, OUT at the end
+ == static wint_t charat(struct match *m, const char *sp);
+ */
+static wint_t
+charat(struct match *m, const char *sp)
+{
+	wint_t c;
+	mbstate_t mbs;
+
+	if (sp >= m->endp)
+		return (OUT);
+	ZAPSTATE(&mbs);
+	(void)XMBRTOWC(&c, sp, m->endp - sp, &mbs, BADCHAR);
+	return (c);
+}
+
+/*
+ - charbefore - the character that ends at a position, OUT at the start
+ == static wint_t charbefore(struct match *m, const char *sp);
+ *
+ * Where a character can be several bytes, the bytes before a position do
+ * not always say where the last character begins.  From the start of a
+ * match on, the characters are the ones the matcher walked over to get
+ * there: walk from the start again, with the character it had there, so
+ * that the same ones are seen, by every pass over the match.  Only
+ * before the start of a match are the bytes read backwards.
+ *
+ * The walk is kept in curp and curc: curc is the character that ends at
+ * curp, and both come from walking forward from coldp with coldc.  They
+ * hold only for the coldp they were made with, so wherever coldp is set,
+ * curp is cleared; a position before curp starts the walk over.
+ */
+static wint_t
+charbefore(struct match *m, const char *sp)
+{
+	const char *p;
+	mbstate_t mbs;
+
+	if (sp <= m->offp)
+		return (OUT);
+	if (MB_CUR_MAX == 1)
+		return ((uch)*(sp - 1));
+	if (m->coldp != NULL && sp >= m->coldp) {
+		if (m->curp == NULL || sp < m->curp) {
+			m->curp = m->coldp;
+			m->curc = m->coldc;
+		}
+		ZAPSTATE(&mbs);
+		while (m->curp < sp)
+			m->curp += XMBRTOWC(&m->curc, m->curp,
+			    m->endp - m->curp, &mbs, BADCHAR);
+		return (m->curc);
+	}
+	p = stepback(m->offp, sp, 1);
+	if (p == NULL)
+		return (BADCHAR);
+	return (charat(m, p));
 }
 
 /*
@@ -271,6 +342,9 @@ matcher(struct re_guts *g,
 	m->offp = string;
 	m->beginp = start;
 	m->endp = stop;
+	m->coldp = NULL;
+	m->coldc = OUT;
+	m->curp = NULL;
 	STATESETUP(m, 4);
 	SETUP(m->st);
 	SETUP(m->fresh);
@@ -294,6 +368,7 @@ matcher(struct re_guts *g,
 	for (;;) {
 		endp = walk(m, start, stop, gf, gl, true);
 		if (endp == NULL) {		/* a miss */
+nomatch:
 			if (m->pmatch != NULL)
 				free((char *)m->pmatch);
 			if (m->lastpos != NULL)
@@ -311,9 +386,17 @@ matcher(struct re_guts *g,
 			endp = walk(m, m->coldp, stop, gf, gl, false);
 			if (endp != NULL)
 				break;
+			/*
+			 * The slow walk must find what the fast walk found;
+			 * the assert says so, the test is for when it is
+			 * compiled out.
+			 */
 			assert(m->coldp < m->endp);
-			m->coldp += XMBRTOWC(NULL, m->coldp,
-			    m->endp - m->coldp, &m->mbs, 0);
+			if (m->coldp >= m->endp)
+				goto nomatch;
+			m->coldp += XMBRTOWC(&m->coldc, m->coldp,
+			    m->endp - m->coldp, &m->mbs, BADCHAR);
+			m->curp = NULL;
 		}
 		if (nmatch == 1 && !g->backrefs)
 			break;		/* no further info needed */
@@ -594,15 +677,15 @@ dissect(struct match *m,
 }
 
 #define	ISBOW(m, sp)					\
-    (sp < m->endp && ISWORD(*sp) &&			\
+    (sp < m->endp && ISWORD(charat(m, sp)) &&		\
     ((sp == m->beginp && !(m->eflags&REG_NOTBOL)) ||	\
-    (sp > m->offp && !ISWORD(*(sp-1)))))
+    (sp > m->offp && !ISWORD(charbefore(m, sp)))))
 #define	ISEOW(m, sp)					\
     (((sp == m->endp && !(m->eflags&REG_NOTEOL)) ||	\
     (sp < m->endp && *sp == '\n' &&			\
     (m->g->cflags&REG_NEWLINE)) ||			\
-    (sp < m->endp && !ISWORD(*sp)) ) &&			\
-    (sp > m->beginp && ISWORD(*(sp-1))))		\
+    (sp < m->endp && !ISWORD(charat(m, sp))) ) &&	\
+    (sp > m->beginp && ISWORD(charbefore(m, sp))))	\
 
 /*
  - backref - figure out what matched what, figuring in back references
@@ -676,7 +759,8 @@ backref(struct match *m,
 		case OBOL:
 			if ((sp == m->beginp && !(m->eflags&REG_NOTBOL)) ||
 			    (sp > m->offp && sp < m->endp &&
-			    *(sp-1) == '\n' && (m->g->cflags&REG_NEWLINE)))
+			    charbefore(m, sp) == '\n' &&
+			    (m->g->cflags&REG_NEWLINE)))
 				{ /* yes */ }
 			else
 				return(NULL);
@@ -696,10 +780,11 @@ backref(struct match *m,
 				return(NULL);
 			break;
 		case ONWBND:
-			if (((sp == m->beginp) && !ISWORD(*sp)) ||
-			    (sp == m->endp && !ISWORD(*(sp - 1))))
+			if (((sp == m->beginp) && !ISWORD(charat(m, sp))) ||
+			    (sp == m->endp && !ISWORD(charbefore(m, sp))))
 				{ /* yes, beginning/end of subject */ }
-			else if (ISWORD(*(sp - 1)) == ISWORD(*sp))
+			else if (ISWORD(charbefore(m, sp)) ==
+			    ISWORD(charat(m, sp)))
 				{ /* yes, beginning/end of subject */ }
 			else
 				return(NULL);
@@ -849,6 +934,7 @@ walk(struct match *m, const char *start, const char *stop, sopno startst,
 	const char *p = start;
 	wint_t c;
 	wint_t lastc;		/* previous c */
+	wint_t matchc;		/* lastc at matchp */
 	wint_t flagch;
 	int i, sflags;
 	const char *matchp;	/* last p at which a match ended */
@@ -863,16 +949,11 @@ walk(struct match *m, const char *start, const char *stop, sopno startst,
 	if (fast)
 		ASSIGN(fresh, st);
 	matchp = NULL;
+	matchc = OUT;
 	if (start == m->offp || (start == m->beginp && !(m->eflags&REG_NOTBOL)))
 		c = OUT;
-	else {
-		/*
-		 * XXX Wrong if the previous character was multi-byte.
-		 * Newline never is (in encodings supported by FreeBSD),
-		 * so this only breaks the ISWORD tests below.
-		 */
-		c = (uch)*(start - 1);
-	}
+	else
+		c = charbefore(m, start);
 	for (;;) {
 		/* next character */
 		lastc = c;
@@ -883,8 +964,10 @@ walk(struct match *m, const char *start, const char *stop, sopno startst,
 		} else
 			clen = XMBRTOWC(&c, p, m->endp - p, &m->mbs, BADCHAR);
 
-		if (fast && EQ(st, fresh))
+		if (fast && EQ(st, fresh)) {
 			matchp = p;
+			matchc = lastc;
+		}
 
 		/* is there an EOL and/or BOL between lastc and c? */
 		flagch = '\0';
@@ -968,6 +1051,8 @@ walk(struct match *m, const char *start, const char *stop, sopno startst,
 	if (fast) {
 		assert(matchp != NULL);
 		m->coldp = matchp;
+		m->coldc = matchc;
+		m->curp = NULL;
 		if (ISSET(st, stopst))
 			return (p + XMBRTOWC(NULL, p, stop - p, &m->mbs, 0));
 		else
@@ -1203,6 +1288,8 @@ pchar(int ch)
 #endif
 
 #undef	stepback
+#undef	charat
+#undef	charbefore
 #undef	matcher
 #undef	walk
 #undef	dissect
