@@ -293,6 +293,7 @@ regcomp_internal(regex_t * __restrict preg,
 	g->iflags = 0;
 	g->nbol = 0;
 	g->neol = 0;
+	g->nwbnd = 0;
 	g->must = NULL;
 	g->moffset = -1;
 	g->charjump = NULL;
@@ -313,6 +314,20 @@ regcomp_internal(regex_t * __restrict preg,
 
 	/* tidy up loose ends and fill things in */
 	stripsnug(p, g);
+	/*
+	 * Count the word boundary operators: the matcher only finds out
+	 * which characters are part of a word when there are any.
+	 */
+	for (i = 1; i < (int)p->slen; i++) {
+		switch (OP(g->strip[i])) {
+		case OBOW:
+		case OEOW:
+		case OWBND:
+		case ONWBND:
+			g->nwbnd++;
+			break;
+		}
+	}
 	findmust(p, g);
 	/* only use Boyer-Moore algorithm if the pattern is bigger
 	 * than three characters

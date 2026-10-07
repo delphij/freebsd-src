@@ -936,6 +936,7 @@ walk(struct match *m, const char *start, const char *stop, sopno startst,
 	wint_t lastc;		/* previous c */
 	wint_t matchc;		/* lastc at matchp */
 	wint_t flagch;
+	int cw, lastcw;		/* are c and lastc word characters */
 	int i, sflags;
 	const char *matchp;	/* last p at which a match ended */
 	size_t clen;
@@ -954,9 +955,14 @@ walk(struct match *m, const char *start, const char *stop, sopno startst,
 		c = OUT;
 	else
 		c = charbefore(m, start);
+	if (m->g->nwbnd != 0)
+		cw = ISWORD(c);
+	else
+		cw = 0;
 	for (;;) {
 		/* next character */
 		lastc = c;
+		lastcw = cw;
 		sflags = 0;
 		if (p == m->endp) {
 			c = OUT;
@@ -999,29 +1005,32 @@ walk(struct match *m, const char *start, const char *stop, sopno startst,
 			SP("sboleol", st, c);
 		}
 
-		/* how about a word boundary? */
-		if ( (flagch == BOL || (lastc != OUT && !ISWORD(lastc))) &&
-					(c != OUT && ISWORD(c)) ) {
-			flagch = BOW;
-		}
-		if ( (lastc != OUT && ISWORD(lastc)) &&
-				(flagch == EOL || (c != OUT && !ISWORD(c))) ) {
-			flagch = EOW;
-		}
-		if (flagch == BOW || flagch == EOW) {
-			st = step(m->g, startst, stopst, st, flagch, st, sflags);
-			SP("sboweow", st, c);
-		}
-		if (lastc != OUT && c != OUT &&
-		    ISWORD(lastc) == ISWORD(c)) {
-			flagch = NWBND;
-		} else if ((lastc == OUT && !ISWORD(c)) ||
-		    (c == OUT && !ISWORD(lastc))) {
-			flagch = NWBND;
-		}
-		if (flagch == NWBND) {
-			st = step(m->g, startst, stopst, st, flagch, st, sflags);
-			SP("snwbnd", st, c);
+		/*
+		 * How about a word boundary?  Only an expression with one
+		 * needs to know, and finding out costs a lookup per character.
+		 */
+		if (m->g->nwbnd != 0) {
+			cw = ISWORD(c);
+			if ((flagch == BOL || (lastc != OUT && !lastcw)) &&
+			    (c != OUT && cw))
+				flagch = BOW;
+			if ((lastc != OUT && lastcw) &&
+			    (flagch == EOL || (c != OUT && !cw)))
+				flagch = EOW;
+			if (flagch == BOW || flagch == EOW) {
+				st = step(m->g, startst, stopst, st, flagch, st,
+				    sflags);
+				SP("sboweow", st, c);
+			}
+			if (lastc != OUT && c != OUT && lastcw == cw)
+				flagch = NWBND;
+			else if ((lastc == OUT && !cw) || (c == OUT && !lastcw))
+				flagch = NWBND;
+			if (flagch == NWBND) {
+				st = step(m->g, startst, stopst, st, flagch, st,
+				    sflags);
+				SP("snwbnd", st, c);
+			}
 		}
 
 		/* are we done? */

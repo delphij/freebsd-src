@@ -185,6 +185,7 @@ struct re_guts {
 #		define	BAD	04	/* something wrong */
 	int nbol;		/* number of ^ used */
 	int neol;		/* number of $ used */
+	int nwbnd;		/* number of word boundary operators used */
 	char *must;		/* match must contain this string */
 	int moffset;		/* latest point at which must may be located */
 	int *charjump;		/* Boyer-Moore char jump table */
