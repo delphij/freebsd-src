@@ -3061,6 +3061,10 @@ _dtrace_tools= cddl/lib/libctf cddl/lib/libspl cddl/usr.bin/ctfconvert \
     cddl/usr.bin/ctfmerge
 .endif
 
+# The ISC post-link CTF converter, always built so that kernels and
+# modules with WITH_CTF can use it, like the tools above.
+_ctf_tools= usr.bin/ctfconv
+
 .if ${MK_ELFTOOLCHAIN_BOOTSTRAP} != "no"
 # Some bespoke tools from or based on ELF Tool Chain.  elfcopy is included
 # because llvm-objcopy is currently not capable of translating ELF to PE32+,
@@ -3116,6 +3120,7 @@ cross-tools: .MAKE .PHONY
     ${_llvm_binutils} \
     ${_elftctools} \
     ${_dtrace_tools} \
+    ${_ctf_tools} \
     ${_btxld} \
     ${_usb_tools}
 	${_+_}@${ECHODIR} "===> ${_tool} (obj,all,install)"; \

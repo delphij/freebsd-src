@@ -108,10 +108,12 @@ DIRDEPS_FILTER.xtras+= Nlib/libc_nonshared
 .endif
 
 # some optional things
-.if ${MK_CTF} == "yes" && ${DEP_RELDIR:Mcddl/usr.bin/ctf*} == ""
+.if ${MK_CTF} == "yes" && ${DEP_RELDIR:Mcddl/usr.bin/ctf*} == "" && \
+    ${DEP_RELDIR} != "usr.bin/ctfconv"
 DIRDEPS += \
 	cddl/usr.bin/ctfconvert.host \
-	cddl/usr.bin/ctfmerge.host
+	cddl/usr.bin/ctfmerge.host \
+	usr.bin/ctfconv.host
 .endif
 
 .if ${DEP_MACHINE:Nhost*} != ""

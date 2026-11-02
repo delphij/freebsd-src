@@ -26,6 +26,7 @@ SUBDIR=	apply \
 	compress \
 	cpio \
 	csplit \
+	ctfconv \
 	ctlstat \
 	cut \
 	diff \
