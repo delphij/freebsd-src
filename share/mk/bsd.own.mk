@@ -156,11 +156,15 @@ __<bsd.own.mk>__:	.NOTMAIN
 
 .if !defined(_WITHOUT_SRCCONF)
 
-.if ${MK_CTF} != "no"
+# WITH_CTF_POSTLINK: no per-object conversion; bsd.prog.mk and
+# bsd.lib.mk run ctfconv once on each linked program and shared library
+# instead (and the kernel makefiles on the kernel and each module).
+# Without it the per-object converter and merger run as before.
+.if ${MK_CTF} != "no" && ${MK_CTF_POSTLINK} == "no"
 CTFCONVERT_CMD=	${CTFCONVERT} ${CTFFLAGS} ${.TARGET}
 .else
 CTFCONVERT_CMD=
-.endif 
+.endif
 
 .endif # !_WITHOUT_SRCCONF
 

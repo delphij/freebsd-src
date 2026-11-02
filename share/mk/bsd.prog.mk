@@ -158,7 +158,13 @@ ${PROG_FULL}: ${OBJS}
 	    ${LDADD}
 .endif
 .if ${MK_CTF} != "no"
+.if ${MK_CTF_POSTLINK} != "no"
+	# CTF indexes .symtab by position: keep this after any symbol
+	# table rewrite (none here; the debug split drops no symbol).
+	${CTFCONV} ${CTFCONVFLAGS} ${.TARGET}
+.else
 	${CTFMERGE} ${CTFFLAGS} -o ${.TARGET} ${OBJS}
+.endif
 .endif
 
 .else	# !defined(SRCS)
@@ -193,7 +199,13 @@ ${PROG_FULL}: ${OBJS}
 	    ${LDADD}
 .endif
 .if ${MK_CTF} != "no"
+.if ${MK_CTF_POSTLINK} != "no"
+	# CTF indexes .symtab by position: keep this after any symbol
+	# table rewrite (none here; the debug split drops no symbol).
+	${CTFCONV} ${CTFCONVFLAGS} ${.TARGET}
+.else
 	${CTFMERGE} ${CTFFLAGS} -o ${.TARGET} ${OBJS}
+.endif
 .endif
 .endif # !target(${PROG})
 

@@ -228,6 +228,10 @@ _STATICLIB_SUFFIX=	_real
 .endif
 _LIBS=		lib${LIB_PRIVATE}${LIB}${_STATICLIB_SUFFIX}.a
 
+# With MK_CTF_POSTLINK the members of a static archive carry no CTF:
+# there is no link step here, and nothing reads CTF out of an archive.
+# A program linked against the archive gets the members' types from
+# the ctfconv run on the program itself, which sees their DWARF.
 lib${LIB_PRIVATE}${LIB}${_STATICLIB_SUFFIX}.a: ${OBJS} ${STATICOBJS}
 	@${ECHO} Building static ${LIB} library
 	@rm -f ${.TARGET}
@@ -292,7 +296,13 @@ ${SHLIB_NAME_FULL}: ${SOBJS}
 	${_LD:N${CCACHE_BIN}} ${LDFLAGS} ${SSP_CFLAGS} ${SOLINKOPTS} \
 	    -o ${.TARGET} -Wl,-soname,${SONAME} ${SOBJS} ${LDADD}
 .if ${MK_CTF} != "no" && defined(SOBJS) && !empty(SOBJS)
+.if ${MK_CTF_POSTLINK} != "no"
+	# CTF indexes .symtab by position: keep this after any symbol
+	# table rewrite (none here; the debug split drops no symbol).
+	${CTFCONV} ${CTFCONVFLAGS} ${.TARGET}
+.else
 	${CTFMERGE} ${CTFFLAGS} -o ${.TARGET} ${SOBJS}
+.endif
 .endif
 
 .if ${MK_DEBUG_FILES} != "no"
