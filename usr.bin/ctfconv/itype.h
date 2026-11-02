@@ -62,6 +62,7 @@ struct itype {
 #define	ITF_INSERTED		 0x20	    /* already found/inserted */
 #define	ITF_USED		 0x40	    /* referenced in the current CU */
 #define	ITF_ANON		 0x80	    /* type without name */
+#define	ITF_ALIAS		0x100	    /* transparent DIE, see cu_lookup() */
 #define	ITF_MASK		(ITF_INSERTED|ITF_USED)
 };
 
@@ -102,6 +103,10 @@ extern int target_reloc;		    /* ET_REL input */
 extern unsigned int target_psz;		    /* target address size, bytes */
 extern const char *dstrbuf;		    /* .debug_str contents */
 extern size_t dstrlen;
+extern const char *daddrbuf;		    /* .debug_addr (DWARF 5) */
+extern size_t daddrlen;
+extern const char *dstroffbuf;		    /* .debug_str_offsets (DWARF 5) */
+extern size_t dstrofflen;
 
 RB_PROTOTYPE(isymb_tree, itype, it_node, it_name_cmp);
 
@@ -110,7 +115,7 @@ const char *it_name(struct itype *);
 const char *im_name(struct imember *);
 
 /* parse.c */
-void dwarf_parse(const char *, size_t, const char *, size_t);
+int dwarf_parse(const char *, size_t, const char *, size_t);
 
 /* generate.c */
 int generate(int, const char *, const char *, const char *, int);

@@ -26,6 +26,7 @@
 #include <capsicum_helpers.h>
 #include <elf.h>
 #include <err.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -57,8 +58,9 @@ void		 dump_func(struct itype *, int *);
 void		 dump_obj(struct itype *, int *);
 
 static struct elfobj		 eo;
-const char			*dstrbuf;
-size_t				 dstrlen;
+/* .debug_str and the DWARF 5 indirection tables, read by parse.c */
+const char			*dstrbuf, *daddrbuf, *dstroffbuf;
+size_t				 dstrlen, daddrlen, dstrofflen;
 static const char		*strtab;
 static const struct elfsym	*symtab;
 static size_t			 strtabsz, nsymb;
@@ -274,8 +276,24 @@ convert(const char *path, int fd)
 	strtabsz = eo.strtabsz;
 	dstrbuf = eo.str;
 	dstrlen = eo.strlen;
+	daddrbuf = eo.addrs;
+	daddrlen = eo.addrslen;
+	dstroffbuf = eo.stroffs;
+	dstrofflen = eo.stroffslen;
 
-	dwarf_parse(eo.info, eo.infolen, eo.abbrev, eo.abbrevlen);
+	error = dwarf_parse(eo.info, eo.infolen, eo.abbrev, eo.abbrevlen);
+	if (error != 0) {
+		/* Unreadable debug data is an error, never "no DWARF". */
+		if (error == ENOTSUP)
+			warnx("%s: DWARF version %u is not supported", path,
+			    dw_cu_version);
+		else if (error == EOVERFLOW)
+			warnx("%s: 64-bit DWARF is not supported", path);
+		else
+			warnx("%s: malformed DWARF", path);
+		elfobj_close(&eo);
+		return -1;
+	}
 
 	/* Sort functions */
 	elf_sort();

@@ -78,6 +78,34 @@ static RB_HEAD(itype_tree, itype) itypet[CTF_K_MAX];
  */
 struct isymb_tree	 isymbt;
 
+/*
+ * DWARF 5 indirection: the strx and addrx forms are indices into
+ * .debug_str_offsets and .debug_addr relative to the unit's
+ * DW_AT_str_offsets_base and DW_AT_addr_base.  cu_bases() takes them
+ * from the unit DIE before anything else of the unit is looked at;
+ * after ld -r every unit has its own, so the attribute is used, never a
+ * fixed header size.
+ */
+static uint64_t		 cu_stroff_base, cu_addr_base;
+static uint64_t		 cu_off;	/* offset of the current CU */
+
+/*
+ * Transparent DIEs of the current CU (DW_TAG_atomic_type: CTF has no
+ * atomic qualifier and DWARF 4 cannot express it).  They sit in the
+ * offset tree so that references to them resolve, through cu_lookup(),
+ * to their target, and they are freed once the CU is resolved; they
+ * never become CTF types.
+ */
+static struct itype_queue aliasq = TAILQ_HEAD_INITIALIZER(aliasq);
+
+static void		 cu_bases(struct dwcu *);
+static struct itype	*cu_lookup(struct ioff_tree *, size_t);
+static const char	*cu_strx(uint64_t);
+static const char	*dstr_at(uint64_t);
+static void		 parse_alias(struct dwdie *, size_t, struct ioff_tree *);
+static void		 refers_attrs(struct dwdie *, size_t, const char **,
+			     size_t *, size_t *);
+
 static struct itype	*void_it;		/* no type is emited for void */
 uint16_t		 tidx;			/* type ID */
 static uint16_t		 fidx, oidx;		/* func & object IDs */
@@ -130,9 +158,13 @@ RB_GENERATE_STATIC(ioff_tree, itype, it_node, it_off_cmp);
  * Construct a list of internal type and functions based on DWARF
  * INFO and ABBREV sections.
  *
- * Multiple CUs are supported.
+ * Multiple CUs are supported.  Returns 0, or the error of the unit
+ * that could not be read: ENOTSUP for a DWARF version the reader does
+ * not handle (dw_cu_version says which), EOVERFLOW for 64-bit DWARF,
+ * anything else for malformed data.  The caller reports it; a unit the
+ * reader cannot parse must never pass for "no DWARF".
  */
-void
+int
 dwarf_parse(const char *infobuf, size_t infolen, const char *abbuf,
     size_t ablen)
 {
@@ -142,7 +174,7 @@ dwarf_parse(const char *infobuf, size_t infolen, const char *abbuf,
 	struct ioff_tree	 cu_iofft;
 	struct itype_queue	 cu_itypeq;
 	struct itype		*it;
-	int			 i;
+	int			 i, error = 0;
 
 	for (i = 0; i < CTF_K_MAX; i++)
 		RB_INIT(&itypet[i]);
@@ -152,7 +184,17 @@ dwarf_parse(const char *infobuf, size_t infolen, const char *abbuf,
 	    CTF_INT_SIGNED, 0, CTF_K_INTEGER, 0);
 	TAILQ_INSERT_TAIL(&itypeq, void_it, it_next);
 
-	while (dw_cu_parse(&info, &abbrev, infolen, &dcu) == 0) {
+	while (info.len > 0) {
+		error = dw_cu_parse(&info, &abbrev, infolen, &dcu);
+		if (error != 0)
+			return error;
+		if (dcu->dcu_unit_type != 0 &&
+		    dcu->dcu_unit_type != DW_UT_compile) {
+			/* Type, skeleton and split units carry nothing for us. */
+			dw_dcu_free(dcu);
+			continue;
+		}
+		cu_bases(dcu);
 		TAILQ_INIT(&cu_itypeq);
 
 		/* We use a tree to speed-up type resolution. */
@@ -189,6 +231,7 @@ dwarf_parse(const char *infobuf, size_t infolen, const char *abbuf,
 			break;
 		}
 	}
+	return 0;
 }
 
 struct itype *
@@ -464,8 +507,13 @@ cu_resolve(struct dwcu *dcu, struct itype_queue *cutq, struct ioff_tree *cuot)
 {
 	struct itype	*it, *ref, tmp;
 	struct imember	*im;
-	unsigned int	 toresolve;
 	size_t		 off = dcu->dcu_offset;
+
+	/* Transparent DIEs first, so that cu_lookup() can see through them. */
+	TAILQ_FOREACH(it, &aliasq, it_next) {
+		tmp.it_off = it->it_ref + off;
+		it->it_refp = RB_FIND(ioff_tree, cuot, &tmp);
+	}
 
 	TAILQ_FOREACH(it, cutq, it_next) {
 		if (!(it->it_flags & (ITF_UNRES|ITF_UNRES_MEMB)))
@@ -473,49 +521,123 @@ cu_resolve(struct dwcu *dcu, struct itype_queue *cutq, struct ioff_tree *cuot)
 
 		/* If this type references another one, try to find it. */
 		if (it->it_flags & ITF_UNRES) {
-			tmp.it_off = it->it_ref + off;
-			ref = RB_FIND(ioff_tree, cuot, &tmp);
-			if (ref != NULL) {
-				it->it_refp = ref;
-				ir_add(it, ref);
-				it->it_flags &= ~ITF_UNRES;
+			ref = cu_lookup(cuot, it->it_ref + off);
+			if (ref == NULL) {
+				/*
+				 * A reference to no DIE the reader knows:
+				 * void, never a dangling pointer for the
+				 * writer.
+				 */
+				ref = void_it;
 			}
+			it->it_refp = ref;
+			ir_add(it, ref);
+			it->it_flags &= ~ITF_UNRES;
 		}
 
 		/* If this type has members, resolve all of them. */
-		toresolve = it->it_nelems;
-		if ((it->it_flags & ITF_UNRES_MEMB) && toresolve > 0) {
-			TAILQ_FOREACH(im, &it->it_members, im_next) {
-				tmp.it_off = im->im_ref + off;
-				ref = RB_FIND(ioff_tree, cuot, &tmp);
-				if (ref != NULL) {
-					im->im_refp = ref;
-					ir_add(it, ref);
-					toresolve--;
-				}
-			}
-			if (toresolve == 0)
-				it->it_flags &= ~ITF_UNRES_MEMB;
-		}
-#if defined(DEBUG)
-		if (it->it_flags & (ITF_UNRES|ITF_UNRES_MEMB)) {
-			printf("0x%zx: %s type=%d unresolved 0x%llx",
-			    it->it_off, it_name(it), it->it_type, it->it_ref);
-			if (toresolve)
-				printf(": %d members", toresolve);
+		if (it->it_flags & ITF_UNRES_MEMB) {
 			TAILQ_FOREACH(im, &it->it_members, im_next) {
 				if (im->im_refp != NULL)
 					continue;
-				printf("\n%zu: %s", im->im_ref, im_name(im));
+				ref = cu_lookup(cuot, im->im_ref + off);
+				if (ref == NULL)
+					ref = void_it;
+				im->im_refp = ref;
+				ir_add(it, ref);
 			}
-			printf("\n");
+			it->it_flags &= ~ITF_UNRES_MEMB;
 		}
-#endif /* defined(DEBUG) */
+	}
+
+	/* The transparent DIEs have served; nothing refers to them now. */
+	while ((it = TAILQ_FIRST(&aliasq)) != NULL) {
+		TAILQ_REMOVE(&aliasq, it, it_next);
+		RB_REMOVE(ioff_tree, cuot, it);
+		it_free(it);
 	}
 
 	/* We'll reuse the tree for the next CU, so empty it. */
 	RB_FOREACH_SAFE(it, ioff_tree, cuot, ref)
 		RB_REMOVE(ioff_tree, cuot, it);
+}
+
+/*
+ * The type at DIE offset ``off'' of the current CU, looking through
+ * transparent DIEs; NULL when there is none.
+ */
+static struct itype *
+cu_lookup(struct ioff_tree *cuot, size_t off)
+{
+	struct itype tmp, *ref;
+	int hops;
+
+	tmp.it_off = off;
+	ref = RB_FIND(ioff_tree, cuot, &tmp);
+	for (hops = 0; ref != NULL && (ref->it_flags & ITF_ALIAS); hops++) {
+		if (hops > 8)
+			return NULL;	/* a cycle of qualifiers */
+		ref = ref->it_refp;
+	}
+	return ref;
+}
+
+/*
+ * DW_AT_str_offsets_base and DW_AT_addr_base of the unit DIE; zero when
+ * absent, as in every unit before DWARF 5.
+ */
+static void
+cu_bases(struct dwcu *dcu)
+{
+	struct dwdie *die = STAILQ_FIRST(&dcu->dcu_dies);
+	struct dwaval *dav;
+
+	cu_off = dcu->dcu_offset;
+	cu_stroff_base = cu_addr_base = 0;
+	if (die == NULL)
+		return;
+	STAILQ_FOREACH(dav, &die->die_avals, dav_next) {
+		switch (dav->dav_dat->dat_attr) {
+		case DW_AT_str_offsets_base:
+			cu_stroff_base = dav2val(dav, dcu->dcu_psize);
+			break;
+		case DW_AT_addr_base:
+			cu_addr_base = dav2val(dav, dcu->dcu_psize);
+			break;
+		default:
+			break;
+		}
+	}
+}
+
+/* String number ``idx'' of the unit, through .debug_str_offsets. */
+static const char *
+cu_strx(uint64_t idx)
+{
+	uint64_t off, soff;
+
+	/* 32-bit DWARF: 4-byte entries. */
+	if (dstroffbuf == NULL || cu_stroff_base > dstrofflen ||
+	    idx > (dstrofflen - cu_stroff_base) / 4)
+		return NULL;
+	off = cu_stroff_base + idx * 4;
+	if (off + 4 > dstrofflen)
+		return NULL;
+	soff = dw_addr(dstroffbuf + off, 4);
+	return dstr_at(soff);
+}
+
+/*
+ * The string at ``off'' in .debug_str, NULL when the offset is outside
+ * the section or no terminator follows it (a truncated section).
+ */
+static const char *
+dstr_at(uint64_t off)
+{
+	if (dstrbuf == NULL || off >= dstrlen ||
+	    memchr(dstrbuf + off, '\0', dstrlen - off) == NULL)
+		return NULL;
+	return dstrbuf + off;
 }
 
 void
@@ -656,6 +778,10 @@ cu_parse(struct dwcu *dcu, struct itype_queue *cutq, struct ioff_tree *cuot)
 		case DW_TAG_pointer_type:
 			it = parse_refers(die, psz, CTF_K_POINTER);
 			break;
+		case DW_TAG_atomic_type:
+			parse_alias(die, psz, cuot);
+			it = NULL;
+			continue;
 		case DW_TAG_structure_type:
 			it = parse_struct(die, psz, CTF_K_STRUCT, off);
 			if (it == NULL)
@@ -828,31 +954,68 @@ parse_base(struct dwdie *die, size_t psz)
 	return it;
 }
 
-struct itype *
-parse_refers(struct dwdie *die, size_t psz, int type)
+/*
+ * The name, DW_AT_type and byte size of a DIE that refers to another
+ * type (qualifiers, pointers, typedefs and the like).
+ */
+static void
+refers_attrs(struct dwdie *die, size_t psz, const char **name, size_t *ref,
+    size_t *size)
 {
-	struct itype *it;
 	struct dwaval *dav;
-	const char *name = NULL;
-	size_t ref = 0, size = 0;
 
+	*name = NULL;
+	*ref = *size = 0;
 	STAILQ_FOREACH(dav, &die->die_avals, dav_next) {
 		switch (dav->dav_dat->dat_attr) {
 		case DW_AT_name:
-			name = dav2str(dav);
+			*name = dav2str(dav);
 			break;
 		case DW_AT_type:
-			ref = dav2val(dav, psz);
+			*ref = dav2val(dav, psz);
 			break;
 		case DW_AT_byte_size:
-			size = dav2val(dav, psz);
-			assert(size < UINT_MAX);
+			*size = dav2val(dav, psz);
+			/* Nonsense on a qualifier or typedef; it_size is 32 bits. */
+			if (*size > UINT32_MAX)
+				*size = 0;
 			break;
 		default:
 			DPRINTF("attribute %#" PRIx64 "\n", dav->dav_dat->dat_attr);
 			break;
 		}
 	}
+}
+
+/*
+ * A transparent DIE (DW_TAG_atomic_type, ``_Atomic'' in DWARF 5): it
+ * stands for its DW_AT_type and is never a CTF type, so it takes no
+ * type ID and does not join the CU queue.  It sits in the offset tree
+ * so that cu_lookup() sees through it, and in aliasq until the CU is
+ * resolved and it is freed.
+ */
+static void
+parse_alias(struct dwdie *die, size_t psz, struct ioff_tree *cuot)
+{
+	struct itype *it;
+	const char *name;
+	size_t ref, size;
+
+	refers_attrs(die, psz, &name, &ref, &size);
+	it = it_new(0, die->die_offset, NULL, 0, 0, ref, CTF_K_UNKNOWN,
+	    ITF_UNRES | ITF_ALIAS);
+	RB_INSERT(ioff_tree, cuot, it);
+	TAILQ_INSERT_TAIL(&aliasq, it, it_next);
+}
+
+struct itype *
+parse_refers(struct dwdie *die, size_t psz, int type)
+{
+	struct itype *it;
+	const char *name;
+	size_t ref, size;
+
+	refers_attrs(die, psz, &name, &ref, &size);
 
 	it = it_new(++tidx, die->die_offset, name, size, 0, ref, type,
 	    ITF_UNRES);
@@ -1343,16 +1506,24 @@ dav2val(struct dwaval *dav, size_t psz)
 
 	switch (dav->dav_dat->dat_form) {
 	case DW_FORM_addr:
-	case DW_FORM_ref_addr:
 		if (psz == sizeof(uint32_t))
 			val = dav->dav_u32;
 		else
 			val = dav->dav_u64;
 		break;
+	case DW_FORM_ref_addr:
+		/*
+		 * Relative to the section, where every other reference is
+		 * relative to the unit; one into another unit resolves to
+		 * nothing (void) since the offset tree is per unit.
+		 */
+		val = dav->dav_u64 - cu_off;
+		break;
 	case DW_FORM_block1:
 	case DW_FORM_block2:
 	case DW_FORM_block4:
 	case DW_FORM_block:
+	case DW_FORM_exprloc:
 		dw_loc_parse(&dav->dav_buf, NULL, &val, NULL);
 		break;
 	case DW_FORM_flag:
@@ -1366,6 +1537,7 @@ dav2val(struct dwaval *dav, size_t psz)
 		break;
 	case DW_FORM_data4:
 	case DW_FORM_ref4:
+	case DW_FORM_sec_offset:
 		val = dav->dav_u32;
 		break;
 	case DW_FORM_sdata:
@@ -1376,10 +1548,29 @@ dav2val(struct dwaval *dav, size_t psz)
 		val = dav->dav_u64;
 		break;
 	case DW_FORM_strp:
+	case DW_FORM_line_strp:
 		val = dav->dav_u32;
 		break;
 	case DW_FORM_flag_present:
 		val = 1;
+		break;
+	/* DWARF 5: indices, resolved by cu_strx() and cu_addrx(). */
+	case DW_FORM_strx:
+	case DW_FORM_strx1:
+	case DW_FORM_strx2:
+	case DW_FORM_strx3:
+	case DW_FORM_strx4:
+	case DW_FORM_addrx:
+	case DW_FORM_addrx1:
+	case DW_FORM_addrx2:
+	case DW_FORM_addrx3:
+	case DW_FORM_addrx4:
+	case DW_FORM_loclistx:
+	case DW_FORM_rnglistx:
+		val = dav->dav_u64;
+		break;
+	case DW_FORM_implicit_const:
+		val = (uint64_t)dav->dav_s64;
 		break;
 	default:
 		break;
@@ -1398,12 +1589,17 @@ dav2str(struct dwaval *dav)
 		str = dav->dav_str;
 		break;
 	case DW_FORM_strp:
-		if (dav->dav_u32 >= dstrlen)
-			str = NULL;
-		else
-			str = dstrbuf + dav->dav_u32;
+		str = dstr_at(dav->dav_u32);
+		break;
+	case DW_FORM_strx:
+	case DW_FORM_strx1:
+	case DW_FORM_strx2:
+	case DW_FORM_strx3:
+	case DW_FORM_strx4:
+		str = cu_strx(dav->dav_u64);
 		break;
 	default:
+		/* DW_FORM_line_strp (.debug_line_str) is not loaded. */
 		break;
 	}
 
