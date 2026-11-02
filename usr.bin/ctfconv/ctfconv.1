@@ -14,29 +14,65 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: August 12 2017 $
+.Dd November 1, 2026
 .Dt CTFCONV 1
 .Os
 .Sh NAME
 .Nm ctfconv
-.Nd generates a raw CTF section from debug data
+.Nd generate CTF type data from DWARF debug information
 .Sh SYNOPSIS
 .Nm ctfconv
-.Op Fl d
-.Fl l Ar label
-.Fl o Ar outfile
+.Op Fl 2v
+.Op Fl l Ar label
+.Op Fl o Ar outfile
+.Ar file
+.Nm ctfconv
+.Fl d
 .Ar file
 .Sh DESCRIPTION
 The
 .Nm
-utility parses DWARF debug sections of
-.Ar file
-to generate
+utility parses the DWARF debug sections of the ELF
+.Ar file ,
+an object, a relocatable object produced by
+.Dq Li ld -r ,
+a shared object or an executable, and generates
 .Dv CTF
-data.
+data for it in one pass.
+By default the data is added to
+.Ar file
+as a
+.Dv .SUNW_ctf
+section, replacing an existing one; every other byte of the file is
+left where it was.
+The file may be of either ELF class and byte order; the
+.Dv CTF
+data is written in the byte order of the file.
+DWARF versions 2 to 5 are read, compressed debug sections included;
+compilation units in languages other than C are skipped.
+References from one compilation unit into another, as link-time
+optimization leaves them, are followed.
+Every symbol of type
+.Dv STT_OBJECT
+or
+.Dv STT_FUNC
+in the symbol table is given the type of the DWARF entity found at its
+address, or failing that, of the unique entity with its name.
+.Pp
+After opening
+.Ar file
+and the directory that will receive the output,
+.Nm
+enters capability mode; see
+.Xr capsicum 4 .
 .Pp
 The options are as follows:
 .Bl -tag -width Ds
+.It Fl 2
+Write
+.Dv CTF
+version 2 instead of version 3.
+Version 2 cannot hold more than 32767 types.
 .It Fl d
 Display types as if they would be dumped from a
 .Dv .SUNW_ctf
@@ -49,19 +85,47 @@ Set the
 .Dv CTF
 label to
 .Ar label .
+Without this option no label is written.
 .It Fl o Ar outfile
-Write the raw section in
-.Ar outfile .
+Instead of modifying
+.Ar file ,
+write the raw, compressed section in
+.Ar outfile ,
+to be added to an object with
+.Dq Li objcopy --add-section .SUNW_ctf= Ns Ar outfile .
+.It Fl v
+Print statistics on standard error: compilation units converted and
+skipped, types parsed, merged and written, conflicting definitions,
+forward declarations, bitfield types, enumerators that do not fit in 32
+bits, and how symbols were matched.
+A second
+.Fl v
+names every skipped compilation unit, conflicting definition and
+untyped symbol.
 .El
 .Sh EXIT STATUS
 .Ex -std ctfconv
+A file without DWARF debug information, or whose compilation units are
+all in other languages, is not an error:
+.Nm
+exits 0 without modifying
+.Ar file
+or writing
+.Ar outfile .
+Debug information that cannot be read, including a DWARF version other
+than 2 to 5, is an error.
+On error
+.Ar file
+is left unmodified.
 .Sh SEE ALSO
 .Xr ctfdump 1 ,
-.Xr ctfstrip 1
+.Xr capsicum 4
 .Sh HISTORY
 The
 .Nm
 utility first appeared in
-.Ox 6.2 .
+.Ox 6.2
+and in
+.Fx 16.0 .
 .Sh AUTHORS
 .An Martin Pieuchot Aq Mt mpi@openbsd.org
