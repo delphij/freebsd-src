@@ -1,0 +1,52 @@
+# Symbols whose type in the containers of the previous build is wrong
+# (see the README).  In kernel modules the CTF
+# step ran before the EXPORT_SYMS/PREFIX_SYMS symbol localization, which
+# reorders .symtab; CTF refers to symbols by table position, so a group
+# of symbols ended up with each other's types.  ctfmerge was right when
+# it ran, and cannot run later (it leaves localized symbols untyped), so
+# the per-object path keeps this; the post-link path converts after the
+# rewrite and is not affected.  These entries describe the old
+# containers.
+#
+# Two kinds of line:
+#   module rotation      ctfcmp.py may apply its rotation rule to this
+#                        module (symbols whose old type is another
+#                        differing symbol's new type and vice versa).
+#                        The rule is symmetric and cannot tell a stale
+#                        old container from a permutation the new tool
+#                        would introduce, so it is restricted to the
+#                        modules where the error was verified against
+#                        the source; anywhere else a rotation is an
+#                        unclassified SYMBOL line.
+#   module kind name     this one symbol (kind is obj or func), for the
+#                        cases the rule does not reach.
+# The module is the basename of the old dump up to its first dot; the
+# kernel is "kernel".
+agp rotation
+pseudofs rotation
+lindebugfs rotation
+mqueuefs rotation
+libiconv rotation
+cd9660 rotation
+msdosfs rotation
+procfs rotation
+udf rotation
+# the kernel links cd9660, msdosfs, agp, procfs and pseudofs
+kernel rotation
+# The entries below are name-matching errors of the old merger, not
+# stale positions: if_cxgb localizes no symbols, and the userland symbol
+# table is never rewritten.
+# if_cxgb: static int nfilters (cxgb_main.c) got the type of a parameter
+# of that name in cxgb_mc5.c.
+if_cxgb obj nfilters
+# libc: the FBSD_1.0 compat symbol timezone is an alias of
+# __timezone_compat(int, int) returning char * (gen/timezone.c,
+# __sym_compat); new types it by address, old typed it by name as
+# long (void), which nothing in libc defines.
+libc func timezone
+# ifconfig: four files define a static ``params'' (iflagg.c, ifvlan.c,
+# ifvxlan.c, ifieee80211.c); for the ifieee80211.c one old took the type
+# of a function-local ``uint32_t params'' of the same file (line 2837
+# vs the file-level struct ieee80211_clone_params at 6077).  New types
+# it by address.
+ifconfig obj params
