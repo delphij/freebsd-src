@@ -1,0 +1,38 @@
+OpenBSD files imported verbatim into usr.bin/ctfconv on 2026-10-30, with
+the CVS revision of each as recorded in its $OpenBSD$ identifier.  The
+files were copied from an anoncvs working copy of OpenBSD src, not from
+a fresh checkout; the one visible consequence is the $Mdocdate$ keyword
+of ctfconv.1, which reads "August 12 2017" in that working copy where a
+checkout of revision 1.8 expands it to "October 17 2017" (the keyword is
+expanded at checkout time, and the copy was last updated to 1.8 before
+the server did so).  Every other byte matches the recorded revisions.
+Every later change in this directory is a delta against these files.
+
+From OpenBSD src/usr.bin/ctfconv:
+  Makefile     (no CVS identifier; OpenBSD build glue, replaced)
+  ctfconv.1    ctfconv.1,v 1.8 2017/10/17 22:47:58 schwarze
+  ctfconv.c    ctfconv.c,v 1.20 2022/10/02 11:56:43 mpi
+  dw.c         dw.c,v 1.6 2024/02/21 13:16:14 claudio
+  dw.h         dw.h,v 1.2 2017/08/11 14:58:56 jasper
+  elf.c        elf.c,v 1.10 2022/08/14 14:54:13 millert
+  generate.c   generate.c,v 1.8 2024/10/02 12:31:33 claudio
+  hash.c       hash.c,v 1.2 2017/08/11 14:58:56 jasper
+  hash.h       hash.h,v 1.2 2017/08/11 14:58:56 jasper
+  itype.h      itype.h,v 1.5 2019/11/11 19:10:35 mpi
+  parse.c      parse.c,v 1.20 2024/02/22 13:17:18 claudio
+  pool.c       pool.c,v 1.4 2023/04/19 12:58:15 jsg
+  pool.h       pool.h,v 1.2 2017/08/11 14:58:56 jasper
+  xmalloc.c    xmalloc.c,v 1.1 2017/08/11 14:21:24 mpi
+  xmalloc.h    xmalloc.h,v 1.1 2017/08/11 14:21:24 mpi
+
+Not imported:
+  ctfstrip, ctfstrip.1 (OpenBSD's objcopy wrapper).
+  dwarf.h and sys/sys/ctf.h: the port uses libdwarf's <dwarf.h> and
+  FreeBSD's <sys/ctf.h> in their place.  The port's constants were
+  compared against these revisions, in src/usr.bin/ctfconv and
+  src/sys/sys respectively:
+    dwarf.h      dwarf.h,v 1.3 2024/02/21 13:16:14 claudio
+    ctf.h        ctf.h,v 1.5 2017/08/13 14:56:05 nayden
+
+Licenses, from the file headers: ISC for all of the above except
+xmalloc.c/xmalloc.h (Tatu Ylonen's permissive notice).
