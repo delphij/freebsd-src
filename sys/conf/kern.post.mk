@@ -33,6 +33,9 @@ MKMODULESENV+=	CONF_CFLAGS="${CONF_CFLAGS}"
 MKMODULESENV+=	WITH_CTF="${WITH_CTF}"
 .endif
 
+# The modules must take the same CTF path as the kernel (kmod.mk).
+MKMODULESENV+=	MK_CTF_POSTLINK="${MK_CTF_POSTLINK}"
+
 .if !empty(KCSAN_ENABLED)
 MKMODULESENV+=	KCSAN_ENABLED="yes"
 .endif
@@ -205,8 +208,12 @@ ${FULLKERNEL}: ${SYSTEM_DEP} vers.o
 	@sh ${S}/tools/embed_mfs.sh ${.TARGET} ${MFS_IMAGE}
 .endif
 .if ${MK_CTF} != "no"
+.if ${MK_CTF_POSTLINK} != "no"
+	${CTFCONV} ${CTFCONVFLAGS} ${.TARGET}
+.else
 	@echo ${CTFMERGE} ${CTFFLAGS} -o ${.TARGET} ...
 	@${CTFMERGE} ${CTFFLAGS} -o ${.TARGET} ${SYSTEM_OBJS} vers.o
+.endif
 .endif
 .if !defined(DEBUG)
 	${OBJCOPY} --strip-debug ${.TARGET}

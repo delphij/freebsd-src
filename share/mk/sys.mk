@@ -171,6 +171,12 @@ CTFMERGE	?=	ctfmerge
 CTFFLAGS	+=	-g
 .endif
 
+# Post-link CTF converter (WITH_CTF_POSTLINK): one run on the linked
+# object replaces ctfconvert on every object plus ctfmerge.  The label
+# is the same VERSION the merger reads from the environment.
+CTFCONV		?=	ctfconv
+CTFCONVFLAGS	?=	${VERSION:D-l "${VERSION}"}
+
 CXX		?=	c++
 CXXFLAGS	?=	${CFLAGS:N-std=*:N-Wnested-externs:N-W*-prototypes:N-Wno-pointer-sign:N-Wold-style-definition}
 IR_CXXFLAGS	?=	${STATIC_CXXFLAGS:N-O*} ${CXXFLAGS:N-O*}

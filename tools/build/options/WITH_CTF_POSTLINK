@@ -1,0 +1,9 @@
+Generate CTF data with one post-link run of
+.Xr ctfconv 1
+on each linked kernel, module, program and shared library instead of
+the per-object converter and merger.
+The post-link path works with link-time optimization and gives a
+program linked against a static archive the types of the archive
+members.
+Only meaningful together with
+.Va WITH_CTF .

@@ -198,6 +198,18 @@ LDFLAGS+=	--no-toc-optimize
 CTFFLAGS+=	-g
 .endif
 
+# WITH_CTF_POSTLINK: no per-object conversion, one ctfconv run on the
+# linked module below.  Without it the per-object converter and merger
+# run as before.  Defaults as in sys.mk and bsd.opts.mk, for builds
+# against an installed share/mk that predates them: those keep the
+# previous path, whose tools they have.
+CTFCONV?=	ctfconv
+CTFCONVFLAGS?=	${VERSION:D-l "${VERSION}"}
+MK_CTF_POSTLINK?=	no
+.if ${MK_CTF_POSTLINK} != "no"
+CTFCONVERT_CMD=
+.endif
+
 .if defined(FIRMWS)
 ${KMOD:S/$/.c/}: ${SYSDIR}/tools/fw_stub.awk
 	${AWK} -f ${SYSDIR}/tools/fw_stub.awk ${FIRMWS} -m${KMOD} -c${KMOD:S/$/.c/g} \
@@ -266,7 +278,15 @@ ${FULLPROG}: ${OBJS} ${BLOB_OBJS}
 .endif
 	${LD} -m ${LD_EMULATION} ${_LDFLAGS} ${LDSCRIPT_FLAGS} -r \
 	    -o ${.TARGET} ${OBJS} ${BLOB_OBJS}
-.if ${MK_CTF} != "no"
+# The per-object path's merger has to run here, before the EXPORT_SYMS
+# and PREFIX_SYMS rewrites below: once those have localized a symbol it
+# can no longer type it (it scopes local symbols by file, and the
+# localized ones land after the last file marker).  CTF refers to
+# symbols by their position in .symtab, so where the rewrite reorders
+# the table the container it leaves is stale: in GENERIC, 116 symbols
+# of nine modules carry another symbol's type.  Nothing in this path
+# can fix that; the post-link path below is not affected.
+.if ${MK_CTF} != "no" && ${MK_CTF_POSTLINK} == "no"
 	${CTFMERGE} ${CTFFLAGS} -o ${.TARGET} ${OBJS} ${BLOB_OBJS}
 .endif
 .if defined(EXPORT_SYMS)
@@ -285,6 +305,14 @@ ${FULLPROG}: ${OBJS} ${BLOB_OBJS}
 .if defined(PREFIX_SYMS)
 	${AWK} -v prefix=${PREFIX_SYMS} -f ${SYSDIR}/conf/kmod_syms_prefix.awk \
 	    ${.TARGET} /dev/null | ${XARGS} ${XARGS_J} % ${OBJCOPY} % ${.TARGET}
+.endif
+# The post-link conversion runs after the EXPORT_SYMS and PREFIX_SYMS
+# rewrites above, which localize symbols and reorder .symtab: CTF refers
+# to symbols by table position, and ctfconv types symbols by address,
+# so the container it leaves matches the final table whatever the
+# rewrite did.  Keep it after any step that touches the symbol table.
+.if ${MK_CTF} != "no" && ${MK_CTF_POSTLINK} != "no"
+	${CTFCONV} ${CTFCONVFLAGS} ${.TARGET}
 .endif
 .if !defined(DEBUG_FLAGS) && ${__KLD_SHARED} == no
 	${OBJCOPY} --strip-debug ${.TARGET}
