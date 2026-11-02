@@ -9,8 +9,6 @@ MAN=		ctfconv.1
 # DWARF constants from libdwarf's <dwarf.h> (BSD).
 LIBADD=		elf z
 
-CFLAGS+=	-DZLIB
-
 WARNS?=		6
 
 .include <bsd.prog.mk>

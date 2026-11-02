@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
+
 #include <sys/ctf.h>
 
 #include <assert.h>
@@ -30,15 +31,54 @@
 #include <stdint.h>
 #include <unistd.h>
 
-#ifdef ZLIB
 #include <zlib.h>
-#endif /* ZLIB */
 
 #include "itype.h"
 #include "xmalloc.h"
 #include "hash.h"
+#include "word.h"
 
 #define ROUNDUP(x, y) ((((x) + (y) - 1) / (y)) * (y))
+
+/*
+ * The container (CTF version 3; version 2 only while it costs nothing):
+ *
+ * - Header, 36 bytes: magic 0xcff1, version, flags (CTF_F_COMPRESS),
+ *   parent label and name (always 0: a non-zero parent name makes
+ *   libctf look for a parent container, which FreeBSD never uses),
+ *   then the offsets of the label, object, function, type and string
+ *   sections relative to the end of the header, and the string table
+ *   length.  The readers require the offsets to be non-decreasing and
+ *   the object, function and type sections 4-byte aligned.
+ * - Label section: one 8-byte entry when -l is given, naming the
+ *   highest type ID; the build always passes one.
+ * - Object and function sections: see the positional contract above
+ *   elf_sort() in ctfconv.c.  A function record is info (kind FUNCTION,
+ *   argument count), return type, argument types; ``...'' is not
+ *   recorded in a record, only in a function type.
+ * - Type section: IDs 1..N in emission order with no holes.  A record
+ *   is name, info (kind, isroot, vlen) and either a size (integer,
+ *   float, array, struct, union, enum) or a type ID (pointer, typedef,
+ *   qualifiers, function's return; a forward's kind).  A size that does
+ *   not fit takes the long form.  The variable part follows, by kind:
+ *   an encoding word for integers and floats, contents/index/count for
+ *   arrays, argument IDs for functions (padded to 4), members (short or
+ *   long form by the aggregate's size) for structs and unions, name and
+ *   int32 value for enumerators.  Readers walk the section with exactly
+ *   these sizes; disagreeing misreads every later type.
+ * - String table: byte 0 is NUL; every name is an offset into it with
+ *   bit 31 clear (set would mean the ELF string table, never used).
+ * Everything after the header is one zlib stream; the readers compute
+ * the inflated size as stroff + strlen and reject a stream of another
+ * length.  The container is written in the target's byte order.
+ *
+ * What is emitted (types_finalize() in parse.c decides): every type
+ * reached from any converted C unit, not only those reachable from
+ * symbols, so that D scripts can use sizeof (struct foo) for types no
+ * symbol has; types reachable only from dropped duplicates are not.
+ * IDs follow first occurrence, so the same input gives a byte-identical
+ * container on every run and host.
+ */
 
 /*
  * Dynamic buffer, used for content & string table.
@@ -66,9 +106,7 @@ struct strentry {
 	size_t		 se_off;
 };
 
-#ifdef ZLIB
-static char	*data_compress(const char *, size_t, size_t, size_t *);
-#endif /* ZLIB */
+static char	*data_compress(const char *, size_t, size_t *);
 
 static void
 dbuf_realloc(struct dbuf *dbuf, size_t len)
@@ -113,6 +151,132 @@ dbuf_pad(struct dbuf *dbuf, int align)
 	return dbuf->coff;
 }
 
+/*
+ * Everything after the header is written in the byte order of the
+ * target, one field at a time, so that the output never depends on
+ * the host.
+ */
+static void
+dbuf_put8(struct dbuf *dbuf, uint8_t v)
+{
+	dbuf_copy(dbuf, &v, sizeof(v));
+}
+
+static void
+dbuf_put16(struct dbuf *dbuf, uint16_t v)
+{
+	if (target_bigendian != host_bigendian())
+		v = (uint16_t)((v >> 8) | (v << 8));
+	dbuf_copy(dbuf, &v, sizeof(v));
+}
+
+static void
+dbuf_put32(struct dbuf *dbuf, uint32_t v)
+{
+	if (target_bigendian != host_bigendian())
+		v = ((v >> 24) & 0xff) | ((v >> 8) & 0xff00) |
+		    ((v << 8) & 0xff0000) | (v << 24);
+	dbuf_copy(dbuf, &v, sizeof(v));
+}
+
+/* One type ID: 16 bits in version 2, 32 bits in version 3. */
+static void
+dbuf_putid(struct dbuf *dbuf, uint32_t id)
+{
+	if (ctf_version == CTF_VERSION_2) {
+		assert(id <= UINT16_MAX);
+		dbuf_put16(dbuf, (uint16_t)id);
+	} else
+		dbuf_put32(dbuf, id);
+}
+
+static uint32_t
+type_info(int kind, int root, uint32_t vlen)
+{
+	if (ctf_version == CTF_VERSION_2)
+		return CTF_V2_TYPE_INFO(kind, root, vlen);
+	return CTF_V3_TYPE_INFO(kind, root, vlen);
+}
+
+static uint32_t
+max_vlen(void)
+{
+	return (ctf_version == CTF_VERSION_2) ? CTF_MAX_VLEN : CTF_V3_MAX_VLEN;
+}
+
+static uint32_t
+max_size(void)
+{
+	return (ctf_version == CTF_VERSION_2) ? CTF_MAX_SIZE : CTF_V3_MAX_SIZE;
+}
+
+static uint32_t
+lsize_sent(void)
+{
+	return (ctf_version == CTF_VERSION_2) ? CTF_LSIZE_SENT :
+	    CTF_V3_LSIZE_SENT;
+}
+
+static uint64_t
+lstruct_thresh(void)
+{
+	return (ctf_version == CTF_VERSION_2) ? CTF_LSTRUCT_THRESH :
+	    CTF_V3_LSTRUCT_THRESH;
+}
+
+/* The readers require the v3 sections on a 4-byte boundary. */
+static int
+section_align(void)
+{
+	return (ctf_version == CTF_VERSION_2) ? 2 : 4;
+}
+
+static const char *
+type_label(struct itype *it)
+{
+	const char *name = it_name(it);
+
+	return (name != NULL) ? name : "(anon)";
+}
+
+/*
+ * Size in bytes of a type, following references.  Arrays need this
+ * because DWARF does not record their size.
+ */
+static uint64_t
+it_bytesize(struct itype *it)
+{
+	int depth;
+
+	for (depth = 0; it != NULL && depth < 64; depth++) {
+		if (it->it_flags & ITF_FORWARD)
+			return 0;
+
+		switch (it->it_type) {
+		case CTF_K_INTEGER:
+		case CTF_K_FLOAT:
+		case CTF_K_STRUCT:
+		case CTF_K_UNION:
+		case CTF_K_ENUM:
+			return it->it_size;
+		case CTF_K_POINTER:
+			return target_psz;
+		case CTF_K_ARRAY:
+			return (uint64_t)it->it_nelems * it_bytesize(it->it_refp);
+		case CTF_K_TYPEDEF:
+		case CTF_K_VOLATILE:
+		case CTF_K_CONST:
+		case CTF_K_RESTRICT:
+			it = it->it_refp;
+			break;
+		default:
+			return 0;
+		}
+	}
+
+	return 0;
+}
+
 static size_t
 imcs_add_string(struct imcs *imcs, const char *str)
 {
@@ -131,173 +295,223 @@ imcs_add_string(struct imcs *imcs, const char *str)
 		dbuf_copy(&imcs->stab, str, strlen(str) + 1);
 	}
 
+	if (se->se_off > CTF_MAX_NAME)
+		errx(1, "string table too large for \"%s\"", str);
+
 	return se->se_off;
 }
 
+/*
+ * Function record: info, return type, argument types.
+ * A symbol without type information is a single zero word.  ``...''
+ * is not recorded here, only in function types.
+ */
 static void
 imcs_add_func(struct imcs *imcs, struct itype *it)
 {
-	uint16_t		 func, arg;
 	struct imember		*im;
-	int			 kind, root, vlen;
+	uint32_t		 vlen;
+
+	if (it->it_type == CTF_K_UNKNOWN) {
+		dbuf_putid(&imcs->body, 0);
+		return;
+	}
+	if (it->it_refp == NULL)
+		errx(1, "internal error: function %s has no return type",
+		    type_label(it));
 
 	vlen = it->it_nelems;
-	kind = it->it_type;
-	root = 0;
+	if (vlen > max_vlen())
+		errx(1, "function %s: too many arguments (%u)", type_label(it),
+		    vlen);
 
-	func = (kind << 11) | (root << 10) | (vlen & CTF_MAX_VLEN);
-	dbuf_copy(&imcs->body, &func, sizeof(func));
+	dbuf_putid(&imcs->body, type_info(CTF_K_FUNCTION, 0, vlen));
+	dbuf_putid(&imcs->body, it->it_refp->it_idx);
 
-	if (kind == CTF_K_UNKNOWN)
-		return;
-
-	func = it->it_refp->it_idx;
-	dbuf_copy(&imcs->body, &func, sizeof(func));
-
-	TAILQ_FOREACH(im, &it->it_members, im_next) {
-		arg = im->im_refp->it_idx;
-		dbuf_copy(&imcs->body, &arg, sizeof(arg));
-	}
+	TAILQ_FOREACH(im, &it->it_members, im_next)
+		dbuf_putid(&imcs->body, im->im_refp->it_idx);
 }
 
 static void
 imcs_add_obj(struct imcs *imcs, struct itype *it)
 {
-	uint16_t		 type;
+	if (it->it_refp == NULL)
+		errx(1, "internal error: object %s has no type",
+		    type_label(it));
+	dbuf_putid(&imcs->body, it->it_refp->it_idx);
+}
 
-	type = it->it_refp->it_idx;
-	dbuf_copy(&imcs->body, &type, sizeof(type));
+/*
+ * Member list of a struct or union.
+ */
+static void
+imcs_add_members(struct imcs *imcs, struct itype *it, uint64_t size)
+{
+	struct imember		*im;
+	uint32_t		 name;
+
+	TAILQ_FOREACH(im, &it->it_members, im_next) {
+		name = imcs_add_string(imcs, im_name(im));
+
+		if (size < lstruct_thresh()) {
+			dbuf_put32(&imcs->body, name);
+			if (ctf_version == CTF_VERSION_2) {
+				dbuf_put16(&imcs->body, im->im_refp->it_idx);
+				dbuf_put16(&imcs->body, im->im_off);
+			} else {
+				dbuf_put32(&imcs->body, im->im_refp->it_idx);
+				dbuf_put32(&imcs->body, im->im_off);
+			}
+		} else {
+			dbuf_put32(&imcs->body, name);
+			if (ctf_version == CTF_VERSION_2) {
+				dbuf_put16(&imcs->body, im->im_refp->it_idx);
+				dbuf_put16(&imcs->body, 0);
+			} else
+				dbuf_put32(&imcs->body, im->im_refp->it_idx);
+			dbuf_put32(&imcs->body, CTF_OFFSET_TO_LMEMHI(im->im_off));
+			dbuf_put32(&imcs->body, CTF_OFFSET_TO_LMEMLO(im->im_off));
+		}
+	}
 }
 
 static void
 imcs_add_type(struct imcs *imcs, struct itype *it)
 {
 	struct imember		*im;
-	struct ctf_type_v2	 ctt;
-	struct ctf_array_v2	 cta;
-	unsigned int		 eob;
-	uint32_t		 size;
-	uint16_t		 arg;
-	size_t			 ctsz;
-	int			 kind, root, vlen;
+	uint64_t		 size;
+	uint32_t		 vlen, name;
+	int			 kind, root;
 
-	assert(it->it_type != CTF_K_UNKNOWN && it->it_type != CTF_K_FORWARD);
+	assert(it->it_type != CTF_K_UNKNOWN);
 
+	kind = it->it_type;
 	vlen = it->it_nelems;
 	size = it->it_size;
-	kind = it->it_type;
-	root = 0;
+	root = (it->it_flags & ITF_ROOT) ? 1 : 0;
 
-	ctt.ctt_name = imcs_add_string(imcs, it_name(it));
-	ctt.ctt_info = (kind << 11) | (root << 10) | (vlen & CTF_MAX_VLEN);
+	if (it->it_flags & ITF_FORWARD) {
+		kind = CTF_K_FORWARD;
+		vlen = 0;
+		stats.st_fwd_left++;
+	} else if (kind == CTF_K_FUNCTION && (it->it_flags & ITF_VARARGS))
+		vlen++;
+	else if (kind == CTF_K_ARRAY) {
+		vlen = 1;
+		size = it_bytesize(it);
+	} else if (kind == CTF_K_INTEGER || kind == CTF_K_FLOAT)
+		vlen = 1;
 
-	/* Base types don't have reference, typedef & pointer don't have size */
-	if (it->it_refp != NULL && kind != CTF_K_ARRAY) {
-		ctt.ctt_type = it->it_refp->it_idx;
-		ctsz = sizeof(struct ctf_stype_v2);
-	} else if (size <= CTF_MAX_SIZE) {
-		if (kind == CTF_K_INTEGER || kind == CTF_K_FLOAT) {
-			assert(size <= 128);
-			if (size == 0)
-				ctt.ctt_size = 0;
-			else if (size <= 8)
-				ctt.ctt_size = 1;
-			else if (size <= 16)
-				ctt.ctt_size = 2;
-			else if (size <= 32)
-				ctt.ctt_size = 4;
-			else if (size <= 64)
-				ctt.ctt_size = 8;
-			else if (size <= 96)
-				ctt.ctt_size = 12;
-			else
-				ctt.ctt_size = 16;
-		} else
-			ctt.ctt_size = size;
-		ctsz = sizeof(struct ctf_stype_v2);
-	} else {
-		ctt.ctt_lsizehi = CTF_SIZE_TO_LSIZE_HI(size);
-		ctt.ctt_lsizelo = CTF_SIZE_TO_LSIZE_LO(size);
-		ctt.ctt_size = CTF_LSIZE_SENT;
-		ctsz = sizeof(struct ctf_type_v2);
-	}
+	if (vlen > max_vlen())
+		errx(1, "type %s: too many members (%u)", type_label(it), vlen);
 
-	dbuf_copy(&imcs->body, &ctt, ctsz);
+	name = imcs_add_string(imcs, it_name(it));
+	dbuf_put32(&imcs->body, name);
+	dbuf_putid(&imcs->body, type_info(kind, root, vlen));
 
 	switch (kind) {
-		assert(1 == 0);
-		break;
-	case CTF_K_INTEGER:
-	case CTF_K_FLOAT:
-		eob = CTF_INT_DATA(it->it_enc, 0, size);
-		dbuf_copy(&imcs->body, &eob, sizeof(eob));
-		break;
-	case CTF_K_ARRAY:
-		memset(&cta, 0, sizeof(cta));
-		cta.cta_contents = it->it_refp->it_idx;
-		cta.cta_index = long_tidx;
-		cta.cta_nelems = it->it_nelems;
-		dbuf_copy(&imcs->body, &cta, sizeof(cta));
-		break;
-	case CTF_K_STRUCT:
-	case CTF_K_UNION:
-		if (size < CTF_LSTRUCT_THRESH) {
-			struct ctf_member_v2	 ctm;
-
-			memset(&ctm, 0, sizeof(ctm));
-			TAILQ_FOREACH(im, &it->it_members, im_next) {
-				ctm.ctm_name =
-				    imcs_add_string(imcs, im_name(im));
-				ctm.ctm_type = im->im_refp->it_idx;
-				ctm.ctm_offset = im->im_off;
-
-				dbuf_copy(&imcs->body, &ctm, sizeof(ctm));
-			}
-		} else {
-			struct ctf_lmember_v2	 ctlm;
-
-			memset(&ctlm, 0, sizeof(ctlm));
-			TAILQ_FOREACH(im, &it->it_members, im_next) {
-				ctlm.ctlm_name =
-				    imcs_add_string(imcs, im_name(im));
-				ctlm.ctlm_type = im->im_refp->it_idx;
-				ctlm.ctlm_offsethi =
-				    CTF_OFFSET_TO_LMEMHI(im->im_off);
-				ctlm.ctlm_offsetlo =
-				    CTF_OFFSET_TO_LMEMLO(im->im_off);
-
-
-				dbuf_copy(&imcs->body, &ctlm, sizeof(ctlm));
-			}
-		}
-		break;
-	case CTF_K_FUNCTION:
-		TAILQ_FOREACH(im, &it->it_members, im_next) {
-			arg = im->im_refp->it_idx;
-			dbuf_copy(&imcs->body, &arg, sizeof(arg));
-		}
-		if (vlen & 1) {
-			arg = 0;
-			dbuf_copy(&imcs->body, &arg, sizeof(arg));
-		}
-		break;
-	case CTF_K_ENUM:
-		TAILQ_FOREACH(im, &it->it_members, im_next) {
-			struct ctf_enum	cte;
-
-			cte.cte_name = imcs_add_string(imcs, im_name(im));
-			cte.cte_value = im->im_ref;
-
-			dbuf_copy(&imcs->body, &cte, sizeof(cte));
-		}
+	case CTF_K_FORWARD:
+		/* The third word carries the kind of the tag. */
+		dbuf_putid(&imcs->body, it->it_type);
 		break;
 	case CTF_K_POINTER:
 	case CTF_K_TYPEDEF:
 	case CTF_K_VOLATILE:
 	case CTF_K_CONST:
 	case CTF_K_RESTRICT:
+	case CTF_K_FUNCTION:
+		assert(it->it_refp != NULL);
+		dbuf_putid(&imcs->body, it->it_refp->it_idx);
+		break;
+	default:
+		/* Sized kinds. */
+		if (size <= max_size())
+			dbuf_putid(&imcs->body, size);
+		else {
+			dbuf_putid(&imcs->body, lsize_sent());
+			dbuf_put32(&imcs->body, CTF_SIZE_TO_LSIZE_HI(size));
+			dbuf_put32(&imcs->body, CTF_SIZE_TO_LSIZE_LO(size));
+		}
+		break;
+	}
+
+	switch (kind) {
+	case CTF_K_INTEGER:
+	case CTF_K_FLOAT:
+		assert(it->it_bits <= UINT16_MAX);
+		dbuf_put32(&imcs->body, CTF_INT_DATA(it->it_enc, 0, it->it_bits));
+		break;
+	case CTF_K_ARRAY:
+		assert(long_it != NULL);
+		dbuf_putid(&imcs->body, it->it_refp->it_idx);
+		dbuf_putid(&imcs->body, long_it->it_idx);
+		dbuf_put32(&imcs->body, it->it_nelems);
+		break;
+	case CTF_K_STRUCT:
+	case CTF_K_UNION:
+		imcs_add_members(imcs, it, size);
+		break;
+	case CTF_K_FUNCTION:
+		TAILQ_FOREACH(im, &it->it_members, im_next)
+			dbuf_putid(&imcs->body, im->im_refp->it_idx);
+		if (it->it_flags & ITF_VARARGS)
+			dbuf_putid(&imcs->body, 0);
+		/* v3 IDs are 4 bytes, so padding only matters for v2. */
+		dbuf_pad(&imcs->body, 4);
+		break;
+	case CTF_K_ENUM:
+		TAILQ_FOREACH(im, &it->it_members, im_next) {
+			dbuf_put32(&imcs->body,
+			    imcs_add_string(imcs, im_name(im)));
+			dbuf_put32(&imcs->body, (uint32_t)(int32_t)im->im_ref);
+		}
+		break;
 	default:
 		break;
+	}
+
+	stats.st_types_out++;
+}
+
+/*
+ * isroot has no effect on any FreeBSD reader (only ctfdump shows it); it
+ * is set for every named integer, float, struct, union and enum, every
+ * typedef, the type of every typed object and the return type of every
+ * typed function, and clear otherwise.
+ */
+static void
+imcs_mark_roots(void)
+{
+	struct itype		*it;
+
+	TAILQ_FOREACH(it, &itypeq, it_next) {
+		if (it->it_flags & (ITF_FUNC|ITF_OBJ))
+			continue;
+
+		switch (it->it_type) {
+		case CTF_K_INTEGER:
+		case CTF_K_FLOAT:
+		case CTF_K_STRUCT:
+		case CTF_K_UNION:
+		case CTF_K_ENUM:
+			if (it_name(it) != NULL && !(it->it_flags & ITF_FORWARD))
+				it->it_flags |= ITF_ROOT;
+			break;
+		case CTF_K_TYPEDEF:
+			it->it_flags |= ITF_ROOT;
+			break;
+		default:
+			break;
+		}
+	}
+
+	TAILQ_FOREACH(it, &iobjq, it_symb) {
+		if (it->it_refp != NULL && it->it_refp != it)
+			it->it_refp->it_flags |= ITF_ROOT;
+	}
+	TAILQ_FOREACH(it, &ifuncq, it_symb) {
+		if (it->it_type == CTF_K_FUNCTION && it->it_refp != NULL)
+			it->it_refp->it_flags |= ITF_ROOT;
 	}
 }
 
@@ -305,7 +519,6 @@ static void
 imcs_generate(struct imcs *imcs, struct ctf_header *cth, const char *label)
 {
 	struct itype		*it;
-	struct ctf_lblent	 lbl;
 
 	memset(imcs, 0, sizeof(*imcs));
 
@@ -323,19 +536,28 @@ imcs_generate(struct imcs *imcs, struct ctf_header *cth, const char *label)
 	cth->cth_parlabel = 0;
 	cth->cth_parname = 0;
 
-	/* Insert a single label for all types. */
+	/* IDs with the top bit set belong to a child container. */
+	if (CTF_V3_TYPE_ISCHILD(tidx) ||
+	    (ctf_version == CTF_VERSION_2 && tidx > 0x7fff))
+		errx(1, "too many types (%u) for CTF version %d", tidx,
+		    ctf_version);
+
+	imcs_mark_roots();
+
+	/* Insert a single label for all types, if one was given. */
 	cth->cth_lbloff = 0;
-	lbl.ctl_label = imcs_add_string(imcs, label);
-	lbl.ctl_typeidx = tidx;
-	dbuf_copy(&imcs->body, &lbl, sizeof(lbl));
+	if (label != NULL) {
+		dbuf_put32(&imcs->body, imcs_add_string(imcs, label));
+		dbuf_put32(&imcs->body, tidx);
+	}
 
 	/* Insert objects */
-	cth->cth_objtoff = dbuf_pad(&imcs->body, 2);
+	cth->cth_objtoff = dbuf_pad(&imcs->body, section_align());
 	TAILQ_FOREACH(it, &iobjq, it_symb)
 		imcs_add_obj(imcs, it);
 
 	/* Insert functions */
-	cth->cth_funcoff = dbuf_pad(&imcs->body, 2);
+	cth->cth_funcoff = dbuf_pad(&imcs->body, section_align());
 	TAILQ_FOREACH(it, &ifuncq, it_symb)
 		imcs_add_func(imcs, it);
 
@@ -354,6 +576,25 @@ imcs_generate(struct imcs *imcs, struct ctf_header *cth, const char *label)
 }
 
 /*
+ * Serialize the header in target byte order.
+ */
+static void
+header_put(struct dbuf *dbuf, const struct ctf_header *cth)
+{
+	dbuf_put16(dbuf, cth->cth_magic);
+	dbuf_put8(dbuf, cth->cth_version);
+	dbuf_put8(dbuf, cth->cth_flags);
+	dbuf_put32(dbuf, cth->cth_parlabel);
+	dbuf_put32(dbuf, cth->cth_parname);
+	dbuf_put32(dbuf, cth->cth_lbloff);
+	dbuf_put32(dbuf, cth->cth_objtoff);
+	dbuf_put32(dbuf, cth->cth_funcoff);
+	dbuf_put32(dbuf, cth->cth_typeoff);
+	dbuf_put32(dbuf, cth->cth_stroff);
+	dbuf_put32(dbuf, cth->cth_strlen);
+}
+
+/*
  * Generate a CTF buffer from the internal type representation.
  * Returns the malloc()ed container and its length, or -1.
  */
@@ -364,25 +605,29 @@ generate_data(const char *label, int compress, char **pdata, size_t *plen)
 	ssize_t			 ctflen;
 	struct ctf_header	 cth;
 	struct imcs		 imcs;
+	struct dbuf		 hdr;
 
 	memset(&cth, 0, sizeof(cth));
 
 	cth.cth_magic = CTF_MAGIC;
-	/* The donor's layouts are version 2 (FreeBSD's CTF_VERSION is 3). */
-	cth.cth_version = CTF_VERSION_2;
+	cth.cth_version = ctf_version;
 
-#ifdef ZLIB
 	if (compress)
 		cth.cth_flags = CTF_F_COMPRESS;
-#endif /* ZLIB */
 
 	imcs_generate(&imcs, &cth, label);
+
+	memset(&hdr, 0, sizeof(hdr));
+	dbuf_realloc(&hdr, sizeof(cth));
+	header_put(&hdr, &cth);
+	assert(hdr.coff == sizeof(cth));
 
 	ctflen = sizeof(cth) + imcs.body.coff + imcs.stab.coff;
 	p = ctfdata = xmalloc(ctflen);
 
-	memcpy(p, &cth, sizeof(cth));
+	memcpy(p, hdr.data, sizeof(cth));
 	p += sizeof(cth);
+	free(hdr.data);
 
 	memcpy(p, imcs.body.data, imcs.body.coff);
 	p += imcs.body.coff;
@@ -392,25 +637,33 @@ generate_data(const char *label, int compress, char **pdata, size_t *plen)
 
 	assert((p - ctfdata) == ctflen);
 
-#ifdef ZLIB
 	if (compress) {
 		char *cdata;
 		size_t clen;
 
 		cdata = data_compress(ctfdata + sizeof(cth),
-		    ctflen - sizeof(cth), ctflen - sizeof(cth), &clen);
+		    ctflen - sizeof(cth), &clen);
 		if (cdata == NULL) {
 			warnx("compressing CTF data");
 			free(ctfdata);
 			return -1;
 		}
 
-		memcpy(ctfdata + sizeof(cth), cdata, clen);
+		/*
+		 * The deflate stream of a tiny body is larger than the
+		 * body, so the container is rebuilt rather than patched.
+		 */
 		ctflen = clen + sizeof(cth);
-
+		p = xmalloc(ctflen);
+		memcpy(p, ctfdata, sizeof(cth));
+		memcpy(p + sizeof(cth), cdata, clen);
+		free(ctfdata);
 		free(cdata);
+		ctfdata = p;
 	}
-#endif /* ZLIB */
+
+	free(imcs.body.data);
+	free(imcs.stab.data);
 
 	*pdata = ctfdata;
 	*plen = ctflen;
@@ -450,19 +703,19 @@ generate(int dfd, const char *base, const char *path, const char *label,
 	return error;
 }
 
-#ifdef ZLIB
+/*
+ * Deflate ``size'' bytes of ``buf'' in one call.  The output buffer is
+ * sized by deflateBound(), since a stream can be longer than its
+ * input; Z_OK from deflate(Z_FINISH) would mean it was still too small
+ * and is not a zlib error code with a message.
+ */
 static char *
-data_compress(const char *buf, size_t size, size_t len, size_t *pclen)
+data_compress(const char *buf, size_t size, size_t *pclen)
 {
 	z_stream		 stream;
-	char			*data;
+	char			*data = NULL;
+	size_t			 len;
 	int			 error;
-
-	data = malloc(len);
-	if (data == NULL) {
-		warn(NULL);
-		return NULL;
-	}
 
 	memset(&stream, 0, sizeof(stream));
 	stream.zalloc = Z_NULL;
@@ -471,7 +724,15 @@ data_compress(const char *buf, size_t size, size_t len, size_t *pclen)
 
 	if ((error = deflateInit(&stream, Z_BEST_COMPRESSION)) != Z_OK) {
 		warnx("zlib deflateInit failed: %s", zError(error));
-		goto exit;
+		return NULL;
+	}
+
+	len = deflateBound(&stream, size);
+	data = malloc(len);
+	if (data == NULL) {
+		warn(NULL);
+		deflateEnd(&stream);
+		return NULL;
 	}
 
 	stream.next_in = __DECONST(unsigned char *, buf);
@@ -480,7 +741,8 @@ data_compress(const char *buf, size_t size, size_t len, size_t *pclen)
 	stream.avail_out = len;
 
 	if ((error = deflate(&stream, Z_FINISH)) != Z_STREAM_END) {
-		warnx("zlib deflate failed: %s", zError(error));
+		warnx("zlib deflate failed: %s", error == Z_OK ?
+		    "output buffer too small" : zError(error));
 		deflateEnd(&stream);
 		goto exit;
 	}
@@ -499,4 +761,3 @@ exit:
 	free(data);
 	return NULL;
 }
-#endif /* ZLIB */
