@@ -1,0 +1,9 @@
+Generate CTF data with the previous per-object converter and merger
+instead of one post-link run of
+.Xr ctfconv 1
+on each linked kernel, module, program and shared library.
+The per-object path cannot work with link-time optimization and leaves
+the members of static archives without types in programs linked
+against them.
+Only meaningful together with
+.Va WITH_CTF .

@@ -198,11 +198,12 @@ LDFLAGS+=	--no-toc-optimize
 CTFFLAGS+=	-g
 .endif
 
-# WITH_CTF_POSTLINK: no per-object conversion, one ctfconv run on the
-# linked module below.  Without it the per-object converter and merger
-# run as before.  Defaults as in sys.mk and bsd.opts.mk, for builds
-# against an installed share/mk that predates them: those keep the
-# previous path, whose tools they have.
+# MK_CTF_POSTLINK (the default): no per-object conversion, one ctfconv
+# run on the linked module below; WITHOUT_CTF_POSTLINK selects the
+# previous per-object converter and merger.  Defaults as in sys.mk, for
+# builds against an installed share/mk that predates them: those have no
+# MK_CTF_POSTLINK either, and keep the previous path, whose tools they
+# have.
 CTFCONV?=	ctfconv
 CTFCONVFLAGS?=	${VERSION:D-l "${VERSION}"}
 MK_CTF_POSTLINK?=	no

@@ -256,10 +256,11 @@ FBT_CFLAGS+=	-I$S/cddl/dev/fbt/x86
 .endif
 FBT_C=		${CC} -c ${FBT_CFLAGS}		${WERROR} ${.IMPSRC}
 
-# WITH_CTF_POSTLINK: no per-object conversion; kern.post.mk runs ctfconv
-# once on the linked kernel.  Without it the per-object converter and
-# merger run as before.  Defaults as in sys.mk and bsd.opts.mk, for
-# builds against an installed share/mk that predates them.
+# MK_CTF_POSTLINK (the default): no per-object conversion; kern.post.mk
+# runs ctfconv once on the linked kernel.  WITHOUT_CTF_POSTLINK selects
+# the previous per-object converter and merger.  Defaults as in sys.mk
+# and bsd.opts.mk, for builds against an installed share/mk that
+# predates them, which keep the previous path.
 CTFCONV?=	ctfconv
 CTFCONVFLAGS?=	${VERSION:D-l "${VERSION}"}
 MK_CTF_POSTLINK?=	no
