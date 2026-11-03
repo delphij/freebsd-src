@@ -722,7 +722,12 @@ data_compress(const char *buf, size_t size, size_t *pclen)
 	stream.zfree = Z_NULL;
 	stream.opaque = Z_NULL;
 
-	if ((error = deflateInit(&stream, Z_BEST_COMPRESSION)) != Z_OK) {
+	/*
+	 * The default level: level 9 costs about six times the CPU of the
+	 * default for under one percent smaller output, and the section is
+	 * paid for on every kernel link.
+	 */
+	if ((error = deflateInit(&stream, Z_DEFAULT_COMPRESSION)) != Z_OK) {
 		warnx("zlib deflateInit failed: %s", zError(error));
 		return NULL;
 	}
