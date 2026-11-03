@@ -36,7 +36,7 @@ struct itype {
 	TAILQ_ENTRY(itype)	 it_symb;   /* itype: global queue of symbol */
 	RB_ENTRY(itype)		 it_node;   /* itype: per-type tree of types */
 
-	SIMPLEQ_HEAD(, itref)	 it_refs;   /* itype: backpointing refs */
+	STAILQ_HEAD(, itref)	 it_refs;   /* itype: backpointing refs */
 
 	TAILQ_HEAD(, imember)	 it_members;/* itype: members of struct/union */
 
@@ -83,7 +83,7 @@ struct imember {
  * merging duplicated types.
  */
 struct itref {
-	SIMPLEQ_ENTRY(itref)	 ir_next;
+	STAILQ_ENTRY(itref)	 ir_next;
 	struct itype		*ir_itp;
 };
 
@@ -96,10 +96,24 @@ extern struct isymb_tree isymbt;	    /* tree of symbols */
 extern uint16_t tidx;		    	    /* type index */
 extern uint16_t long_tidx;		    /* type ID for "long" */
 
+/* Target properties, set by ctfconv.c. */
+extern int target_bigendian;		    /* ELFDATA2MSB input */
+extern int target_reloc;		    /* ET_REL input */
+extern unsigned int target_psz;		    /* target address size, bytes */
+extern const char *dstrbuf;		    /* .debug_str contents */
+extern size_t dstrlen;
+
 RB_PROTOTYPE(isymb_tree, itype, it_node, it_name_cmp);
 
 struct itype *it_dup(struct itype *);
 const char *it_name(struct itype *);
 const char *im_name(struct imember *);
+
+/* parse.c */
+void dwarf_parse(const char *, size_t, const char *, size_t);
+
+/* generate.c */
+int generate(int, const char *, const char *, const char *, int);
+int generate_data(const char *, int, char **, size_t *);
 
 #endif /*_ITTYPE_H_ */

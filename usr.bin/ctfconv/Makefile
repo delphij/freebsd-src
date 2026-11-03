@@ -1,19 +1,16 @@
+# FreeBSD build glue for ctfconv (ISC, derived from OpenBSD usr.bin/ctfconv).
+# See DONOR-REVISIONS.txt for the imported revisions.
 
 PROG=		ctfconv
-SRCS=		ctfconv.c parse.c elf.c dw.c generate.c hash.c xmalloc.c \
-		pool.c
+SRCS=		ctfconv.c parse.c elf.c dw.c generate.c hash.c xmalloc.c pool.c
+MAN=		ctfconv.1
 
-CFLAGS+=	-W -Wall -Wstrict-prototypes -Wno-unused -Wunused-variable \
-		-Wno-unused-parameter
+# The CTF format comes from <sys/ctf.h> (ISC, OpenBSD-derived) and the
+# DWARF constants from libdwarf's <dwarf.h> (BSD).
+LIBADD=		elf z
 
 CFLAGS+=	-DZLIB
-LDADD+=		-lz
-DPADD+=		${LIBZ}
 
-MAN=		ctfconv.1 ctfstrip.1
-
-afterinstall:
-	${INSTALL} ${INSTALL_COPY} -o ${BINOWN} -g ${BINGRP} -m ${BINMODE} \
-		${.CURDIR}/ctfstrip ${DESTDIR}${BINDIR}/ctfstrip
+WARNS?=		6
 
 .include <bsd.prog.mk>

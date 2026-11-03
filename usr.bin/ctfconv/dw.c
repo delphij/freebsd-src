@@ -19,23 +19,21 @@
 
 #include <sys/queue.h>
 
+#include <dwarf.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "dw.h"
-#include "dwarf.h"
 #include "pool.h"
+#include "word.h"
 
 #ifndef NOPOOL
-struct pool dcu_pool, die_pool, dav_pool, dab_pool, dat_pool;
+static struct pool dcu_pool, die_pool, dav_pool, dab_pool, dat_pool;
 #endif /* NOPOOL */
-
-#ifndef nitems
-#define nitems(_a)	(sizeof((_a)) / sizeof((_a)[0]))
-#endif
 
 static int	 dw_read_u8(struct dwbuf *, uint8_t *);
 static int	 dw_read_u16(struct dwbuf *, uint16_t *);
@@ -75,22 +73,47 @@ dw_read_u8(struct dwbuf *d, uint8_t *v)
 	return dw_read_bytes(d, v, sizeof(*v));
 }
 
+/*
+ * Multi-byte DWARF fields are in the target's byte order; swap them
+ * when it differs from the host's.
+ */
+int	dw_bigendian;
+
+uint64_t
+dw_addr(const char *p, size_t size)
+{
+	return load_word(p, size, dw_bigendian);
+}
+
 static int
 dw_read_u16(struct dwbuf *d, uint16_t *v)
 {
-	return dw_read_bytes(d, v, sizeof(*v));
+	if (dw_read_bytes(d, v, sizeof(*v)))
+		return -1;
+	if (dw_bigendian != host_bigendian())
+		*v = (uint16_t)((*v >> 8) | (*v << 8));
+	return 0;
 }
 
 static int
 dw_read_u32(struct dwbuf *d, uint32_t *v)
 {
-	return dw_read_bytes(d, v, sizeof(*v));
+	if (dw_read_bytes(d, v, sizeof(*v)))
+		return -1;
+	if (dw_bigendian != host_bigendian())
+		*v = ((*v >> 24) & 0xff) | ((*v >> 8) & 0xff00) |
+		    ((*v << 8) & 0xff0000) | (*v << 24);
+	return 0;
 }
 
 static int
 dw_read_u64(struct dwbuf *d, uint64_t *v)
 {
-	return dw_read_bytes(d, v, sizeof(*v));
+	if (dw_read_bytes(d, v, sizeof(*v)))
+		return -1;
+	if (dw_bigendian != host_bigendian())
+		*v = ((uint64_t)dw_addr((const char *)v, 8));
+	return 0;
 }
 
 /* Read a DWARF LEB128 (little-endian base-128) value. */
@@ -163,72 +186,6 @@ dw_skip_bytes(struct dwbuf *d, size_t n)
 	d->buf += n;
 	d->len -= n;
 	return 0;
-}
-
-const char *
-dw_tag2name(uint64_t tag)
-{
-	static const char *dw_tags[] = { DW_TAG_NAMES };
-
-	if (tag <= nitems(dw_tags))
-		return dw_tags[tag - 1];
-
-	if (tag == DW_TAG_lo_user)
-		return "DW_TAG_lo_user";
-	if (tag == DW_TAG_hi_user)
-		return "DW_TAG_hi_user";
-
-	return NULL;
-}
-
-const char *
-dw_at2name(uint64_t at)
-{
-	static const char *dw_attrs[] = { DW_AT_NAMES };
-	static char buf[64];
-
-	if (at <= nitems(dw_attrs))
-		return dw_attrs[at - 1];
-
-	if (at == DW_AT_lo_user)
-		return "DW_AT_lo_user";
-	if (at == DW_AT_hi_user)
-		return "DW_AT_hi_user";
-
-	snprintf(buf, sizeof(buf), "#%llu", at);
-	return buf;
-}
-
-const char *
-dw_form2name(uint64_t form)
-{
-	static const char *dw_forms[] = { DW_FORM_NAMES };
-
-	if (form <= nitems(dw_forms))
-		return dw_forms[form - 1];
-
-	if (form == DW_FORM_GNU_ref_alt)
-		return "DW_FORM_GNU_ref_alt";
-	if (form == DW_FORM_GNU_strp_alt)
-		return "DW_FORM_GNU_strp_alt";
-
-	return NULL;
-}
-
-const char *
-dw_op2name(uint8_t op)
-{
-	static const char *dw_ops[] = { DW_OP_NAMES };
-
-	if (op <= nitems(dw_ops))
-		return dw_ops[op - 1];
-
-	if (op == DW_OP_lo_user)
-		return "DW_OP_lo_user";
-	if (op == DW_OP_hi_user)
-		return "DW_OP_hi_user";
-
-	return NULL;
 }
 
 static int
@@ -322,7 +279,7 @@ dw_attr_parse(struct dwbuf *dwbuf, struct dwattr *dat, uint8_t psz,
 		return error;
 	}
 
-	SIMPLEQ_INSERT_TAIL(davq, dav, dav_next);
+	STAILQ_INSERT_TAIL(davq, dav, dav_next);
 	return 0;
 }
 
@@ -331,12 +288,12 @@ dw_attr_purge(struct dwaval_queue *davq)
 {
 	struct dwaval	*dav;
 
-	while ((dav = SIMPLEQ_FIRST(davq)) != NULL) {
-		SIMPLEQ_REMOVE_HEAD(davq, dav_next);
+	while ((dav = STAILQ_FIRST(davq)) != NULL) {
+		STAILQ_REMOVE_HEAD(davq, dav_next);
 		pfree(&dav_pool, dav);
 	}
 
-	SIMPLEQ_INIT(davq);
+	STAILQ_INIT(davq);
 }
 
 static int
@@ -362,7 +319,7 @@ dw_die_parse(struct dwbuf *dwbuf, size_t nextoff, uint8_t psz,
 			continue;
 		}
 
-		SIMPLEQ_FOREACH(dab, dabq, dab_next) {
+		STAILQ_FOREACH(dab, dabq, dab_next) {
 			if (dab->dab_code == code)
 				break;
 		}
@@ -376,9 +333,9 @@ dw_die_parse(struct dwbuf *dwbuf, size_t nextoff, uint8_t psz,
 		die->die_lvl = lvl;
 		die->die_dab = dab;
 		die->die_offset = doff;
-		SIMPLEQ_INIT(&die->die_avals);
+		STAILQ_INIT(&die->die_avals);
 
-		SIMPLEQ_FOREACH(dat, &dab->dab_attrs, dat_next) {
+		STAILQ_FOREACH(dat, &dab->dab_attrs, dat_next) {
 			error = dw_attr_parse(dwbuf, dat, psz, &die->die_avals);
 			if (error != 0) {
 				dw_attr_purge(&die->die_avals);
@@ -389,7 +346,7 @@ dw_die_parse(struct dwbuf *dwbuf, size_t nextoff, uint8_t psz,
 		if (dab->dab_children == DW_CHILDREN_yes)
 			lvl++;
 
-		SIMPLEQ_INSERT_TAIL(dieq, die, die_next);
+		STAILQ_INSERT_TAIL(dieq, die, die_next);
 	}
 
 	return 0;
@@ -400,13 +357,13 @@ dw_die_purge(struct dwdie_queue *dieq)
 {
 	struct dwdie	*die;
 
-	while ((die = SIMPLEQ_FIRST(dieq)) != NULL) {
-		SIMPLEQ_REMOVE_HEAD(dieq, die_next);
+	while ((die = STAILQ_FIRST(dieq)) != NULL) {
+		STAILQ_REMOVE_HEAD(dieq, die_next);
 		dw_attr_purge(&die->die_avals);
 		pfree(&die_pool, die);
 	}
 
-	SIMPLEQ_INIT(dieq);
+	STAILQ_INIT(dieq);
 }
 
 int
@@ -434,9 +391,9 @@ dw_ab_parse(struct dwbuf *abseg, struct dwabbrev_queue *dabq)
 		dab->dab_code = code;
 		dab->dab_tag = tag;
 		dab->dab_children = children;
-		SIMPLEQ_INIT(&dab->dab_attrs);
+		STAILQ_INIT(&dab->dab_attrs);
 
-		SIMPLEQ_INSERT_TAIL(dabq, dab, dab_next);
+		STAILQ_INSERT_TAIL(dabq, dab, dab_next);
 
 		for (;;) {
 			struct dwattr *dat;
@@ -456,7 +413,7 @@ dw_ab_parse(struct dwbuf *abseg, struct dwabbrev_queue *dabq)
 			dat->dat_attr = attr;
 			dat->dat_form = form;
 
-			SIMPLEQ_INSERT_TAIL(&dab->dab_attrs, dat, dat_next);
+			STAILQ_INSERT_TAIL(&dab->dab_attrs, dat, dat_next);
 		}
 	}
 
@@ -468,19 +425,19 @@ dw_dabq_purge(struct dwabbrev_queue *dabq)
 {
 	struct dwabbrev	*dab;
 
-	while ((dab = SIMPLEQ_FIRST(dabq)) != NULL) {
+	while ((dab = STAILQ_FIRST(dabq)) != NULL) {
 		struct dwattr *dat;
 
-		SIMPLEQ_REMOVE_HEAD(dabq, dab_next);
-		while ((dat = SIMPLEQ_FIRST(&dab->dab_attrs)) != NULL) {
-			SIMPLEQ_REMOVE_HEAD(&dab->dab_attrs, dat_next);
+		STAILQ_REMOVE_HEAD(dabq, dab_next);
+		while ((dat = STAILQ_FIRST(&dab->dab_attrs)) != NULL) {
+			STAILQ_REMOVE_HEAD(&dab->dab_attrs, dat_next);
 			pfree(&dat_pool, dat);
 		}
 
 		pfree(&dab_pool, dab);
 	}
 
-	SIMPLEQ_INIT(dabq);
+	STAILQ_INIT(dabq);
 }
 
 int
@@ -489,7 +446,7 @@ dw_cu_parse(struct dwbuf *info, struct dwbuf *abbrev, size_t seglen,
 {
 	struct dwbuf	 abseg = *abbrev;
 	struct dwbuf	 dwbuf;
-	size_t		 segoff, nextoff, addrsize;
+	size_t		 segoff, nextoff;
 	struct dwcu	*dcu = NULL;
 	uint32_t	 length = 0, abbroff = 0;
 	uint16_t	 version;
@@ -526,10 +483,9 @@ dw_cu_parse(struct dwbuf *info, struct dwbuf *abbrev, size_t seglen,
 	if (dw_read_buf(info, &dwbuf, length))
 		return -1;
 
-	addrsize = 4; /* XXX */
-
+	/* 32-bit DWARF only: the abbreviation offset is 4 bytes. */
 	if (dw_read_u16(&dwbuf, &version) ||
-	    dw_read_bytes(&dwbuf, &abbroff, addrsize) ||
+	    dw_read_u32(&dwbuf, &abbroff) ||
 	    dw_read_u8(&dwbuf, &psz))
 		return -1;
 
@@ -549,8 +505,8 @@ dw_cu_parse(struct dwbuf *info, struct dwbuf *abbrev, size_t seglen,
 	dcu->dcu_version = version;
 	dcu->dcu_abbroff = abbroff;
 	dcu->dcu_psize = psz;
-	SIMPLEQ_INIT(&dcu->dcu_abbrevs);
-	SIMPLEQ_INIT(&dcu->dcu_dies);
+	STAILQ_INIT(&dcu->dcu_abbrevs);
+	STAILQ_INIT(&dcu->dcu_dies);
 
 	error = dw_ab_parse(&abseg, &dcu->dcu_abbrevs);
 	if (error != 0) {
@@ -589,6 +545,7 @@ dw_loc_parse(struct dwbuf *dwbuf, uint8_t *pop, uint64_t *poper1,
     uint64_t *poper2)
 {
 	uint64_t oper1 = 0, oper2 = 0;
+	int64_t soper;
 	uint8_t op;
 
 	if (dw_read_u8(dwbuf, &op))
@@ -608,7 +565,8 @@ dw_loc_parse(struct dwbuf *dwbuf, uint8_t *pop, uint64_t *poper1,
 	case DW_OP_consts:
 	case DW_OP_breg0 ... DW_OP_breg31:
 	case DW_OP_fbreg:
-		dw_read_sleb128(dwbuf, &oper1);
+		dw_read_sleb128(dwbuf, &soper);
+		oper1 = (uint64_t)soper;
 		break;
 	default:
 		return ENOTSUP;

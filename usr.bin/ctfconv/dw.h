@@ -19,19 +19,21 @@
 #ifndef _DW_H_
 #define _DW_H_
 
+#include <sys/queue.h>
+
 struct dwbuf {
 	const char		*buf;
 	size_t			 len;
 };
 
 struct dwattr {
-	SIMPLEQ_ENTRY(dwattr)	 dat_next;
+	STAILQ_ENTRY(dwattr)	 dat_next;
 	uint64_t		 dat_attr;
 	uint64_t		 dat_form;
 };
 
 struct dwaval {
-	SIMPLEQ_ENTRY(dwaval)	 dav_next;
+	STAILQ_ENTRY(dwaval)	 dav_next;
 	struct dwattr		*dav_dat;	/* corresponding attribute */
 	union {
 		struct dwbuf	 _buf;
@@ -55,27 +57,27 @@ struct dwaval {
 #define dav_u8	AV._V._T._u8
 };
 
-SIMPLEQ_HEAD(dwaval_queue, dwaval);
+STAILQ_HEAD(dwaval_queue, dwaval);
 
 struct dwdie {
-	SIMPLEQ_ENTRY(dwdie)	 die_next;
+	STAILQ_ENTRY(dwdie)	 die_next;
 	struct dwabbrev		*die_dab;
 	size_t			 die_offset;
 	uint8_t			 die_lvl;
 	struct dwaval_queue	 die_avals;
 };
 
-SIMPLEQ_HEAD(dwdie_queue, dwdie);
+STAILQ_HEAD(dwdie_queue, dwdie);
 
 struct dwabbrev {
-	SIMPLEQ_ENTRY(dwabbrev)	 dab_next;
+	STAILQ_ENTRY(dwabbrev)	 dab_next;
 	uint64_t		 dab_code;
 	uint64_t		 dab_tag;
 	uint8_t			 dab_children;
-	SIMPLEQ_HEAD(, dwattr)	 dab_attrs;
+	STAILQ_HEAD(, dwattr)	 dab_attrs;
 };
 
-SIMPLEQ_HEAD(dwabbrev_queue, dwabbrev);
+STAILQ_HEAD(dwabbrev_queue, dwabbrev);
 
 struct dwcu {
 	uint64_t		 dcu_length;
@@ -87,12 +89,10 @@ struct dwcu {
 	struct dwdie_queue	 dcu_dies;
 };
 
-const char	*dw_tag2name(uint64_t);
-const char	*dw_at2name(uint64_t);
-const char	*dw_form2name(uint64_t);
-const char	*dw_op2name(uint8_t);
-
 int	 dw_loc_parse(struct dwbuf *, uint8_t *, uint64_t *, uint64_t *);
+
+extern int dw_bigendian;		/* target byte order */
+uint64_t dw_addr(const char *, size_t);	/* read a target address */
 
 int	 dw_ab_parse(struct dwbuf *, struct dwabbrev_queue *);
 int	 dw_cu_parse(struct dwbuf *, struct dwbuf *, size_t, struct dwcu **);

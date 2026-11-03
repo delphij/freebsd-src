@@ -67,10 +67,10 @@ struct strentry {
 };
 
 #ifdef ZLIB
-char		*data_compress(const char *, size_t, size_t, size_t *);
+static char	*data_compress(const char *, size_t, size_t, size_t *);
 #endif /* ZLIB */
 
-void
+static void
 dbuf_realloc(struct dbuf *dbuf, size_t len)
 {
 	assert(dbuf != NULL);
@@ -81,7 +81,7 @@ dbuf_realloc(struct dbuf *dbuf, size_t len)
 	dbuf->cptr = dbuf->data + dbuf->coff;
 }
 
-void
+static void
 dbuf_copy(struct dbuf *dbuf, void const *data, size_t len)
 {
 	size_t left;
@@ -102,7 +102,7 @@ dbuf_copy(struct dbuf *dbuf, void const *data, size_t len)
 	dbuf->coff += len;
 }
 
-size_t
+static size_t
 dbuf_pad(struct dbuf *dbuf, int align)
 {
 	int i = (align - (dbuf->coff % align)) % align;
@@ -113,7 +113,7 @@ dbuf_pad(struct dbuf *dbuf, int align)
 	return dbuf->coff;
 }
 
-size_t
+static size_t
 imcs_add_string(struct imcs *imcs, const char *str)
 {
 	struct strentry *se;
@@ -134,7 +134,7 @@ imcs_add_string(struct imcs *imcs, const char *str)
 	return se->se_off;
 }
 
-void
+static void
 imcs_add_func(struct imcs *imcs, struct itype *it)
 {
 	uint16_t		 func, arg;
@@ -160,7 +160,7 @@ imcs_add_func(struct imcs *imcs, struct itype *it)
 	}
 }
 
-void
+static void
 imcs_add_obj(struct imcs *imcs, struct itype *it)
 {
 	uint16_t		 type;
@@ -169,12 +169,12 @@ imcs_add_obj(struct imcs *imcs, struct itype *it)
 	dbuf_copy(&imcs->body, &type, sizeof(type));
 }
 
-void
+static void
 imcs_add_type(struct imcs *imcs, struct itype *it)
 {
 	struct imember		*im;
-	struct ctf_type		 ctt;
-	struct ctf_array	 cta;
+	struct ctf_type_v2	 ctt;
+	struct ctf_array_v2	 cta;
 	unsigned int		 eob;
 	uint32_t		 size;
 	uint16_t		 arg;
@@ -194,7 +194,7 @@ imcs_add_type(struct imcs *imcs, struct itype *it)
 	/* Base types don't have reference, typedef & pointer don't have size */
 	if (it->it_refp != NULL && kind != CTF_K_ARRAY) {
 		ctt.ctt_type = it->it_refp->it_idx;
-		ctsz = sizeof(struct ctf_stype);
+		ctsz = sizeof(struct ctf_stype_v2);
 	} else if (size <= CTF_MAX_SIZE) {
 		if (kind == CTF_K_INTEGER || kind == CTF_K_FLOAT) {
 			assert(size <= 128);
@@ -214,12 +214,12 @@ imcs_add_type(struct imcs *imcs, struct itype *it)
 				ctt.ctt_size = 16;
 		} else
 			ctt.ctt_size = size;
-		ctsz = sizeof(struct ctf_stype);
+		ctsz = sizeof(struct ctf_stype_v2);
 	} else {
 		ctt.ctt_lsizehi = CTF_SIZE_TO_LSIZE_HI(size);
 		ctt.ctt_lsizelo = CTF_SIZE_TO_LSIZE_LO(size);
 		ctt.ctt_size = CTF_LSIZE_SENT;
-		ctsz = sizeof(struct ctf_type);
+		ctsz = sizeof(struct ctf_type_v2);
 	}
 
 	dbuf_copy(&imcs->body, &ctt, ctsz);
@@ -242,7 +242,7 @@ imcs_add_type(struct imcs *imcs, struct itype *it)
 	case CTF_K_STRUCT:
 	case CTF_K_UNION:
 		if (size < CTF_LSTRUCT_THRESH) {
-			struct ctf_member	 ctm;
+			struct ctf_member_v2	 ctm;
 
 			memset(&ctm, 0, sizeof(ctm));
 			TAILQ_FOREACH(im, &it->it_members, im_next) {
@@ -254,7 +254,7 @@ imcs_add_type(struct imcs *imcs, struct itype *it)
 				dbuf_copy(&imcs->body, &ctm, sizeof(ctm));
 			}
 		} else {
-			struct ctf_lmember	 ctlm;
+			struct ctf_lmember_v2	 ctlm;
 
 			memset(&ctlm, 0, sizeof(ctlm));
 			TAILQ_FOREACH(im, &it->it_members, im_next) {
@@ -301,7 +301,7 @@ imcs_add_type(struct imcs *imcs, struct itype *it)
 	}
 }
 
-void
+static void
 imcs_generate(struct imcs *imcs, struct ctf_header *cth, const char *label)
 {
 	struct itype		*it;
@@ -355,20 +355,21 @@ imcs_generate(struct imcs *imcs, struct ctf_header *cth, const char *label)
 
 /*
  * Generate a CTF buffer from the internal type representation.
+ * Returns the malloc()ed container and its length, or -1.
  */
 int
-generate(const char *path, const char *label, int compress)
+generate_data(const char *label, int compress, char **pdata, size_t *plen)
 {
 	char			*p, *ctfdata = NULL;
 	ssize_t			 ctflen;
 	struct ctf_header	 cth;
 	struct imcs		 imcs;
-	int			 error = 0, fd;
 
 	memset(&cth, 0, sizeof(cth));
 
 	cth.cth_magic = CTF_MAGIC;
-	cth.cth_version = CTF_VERSION;
+	/* The donor's layouts are version 2 (FreeBSD's CTF_VERSION is 3). */
+	cth.cth_version = CTF_VERSION_2;
 
 #ifdef ZLIB
 	if (compress)
@@ -411,15 +412,36 @@ generate(const char *path, const char *label, int compress)
 	}
 #endif /* ZLIB */
 
-	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	*pdata = ctfdata;
+	*plen = ctflen;
+	return 0;
+}
+
+/*
+ * Raw mode: the container alone, in ``path'', which is ``base'' in the
+ * directory open on ``dfd'' (the tool is in capability mode, see
+ * sandbox() in ctfconv.c).
+ */
+int
+generate(int dfd, const char *base, const char *path, const char *label,
+    int compress)
+{
+	char			*ctfdata;
+	size_t			 ctflen;
+	int			 error = 0, fd;
+
+	if (generate_data(label, compress, &ctfdata, &ctflen) == -1)
+		return -1;
+
+	fd = openat(dfd, base, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (fd == -1) {
 		warn("open %s", path);
 		free(ctfdata);
 		return -1;
 	}
 
-	if (write(fd, ctfdata, ctflen) != ctflen) {
-		warn("unable to write %zd bytes for %s", ctflen, path);
+	if (write(fd, ctfdata, ctflen) != (ssize_t)ctflen) {
+		warn("unable to write %zu bytes for %s", ctflen, path);
 		error = -1;
 	}
 
@@ -429,7 +451,7 @@ generate(const char *path, const char *label, int compress)
 }
 
 #ifdef ZLIB
-char *
+static char *
 data_compress(const char *buf, size_t size, size_t len, size_t *pclen)
 {
 	z_stream		 stream;
@@ -452,7 +474,7 @@ data_compress(const char *buf, size_t size, size_t len, size_t *pclen)
 		goto exit;
 	}
 
-	stream.next_in = (void *)buf;
+	stream.next_in = __DECONST(unsigned char *, buf);
 	stream.avail_in = size;
 	stream.next_out = (unsigned char *)data;
 	stream.avail_out = len;

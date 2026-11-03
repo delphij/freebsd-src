@@ -17,16 +17,17 @@
  */
 
 #include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
+#include <sys/capsicum.h>
 #include <sys/ctf.h>
 
 #include <assert.h>
+#include <capsicum_helpers.h>
 #include <elf.h>
 #include <err.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <locale.h>
 #include <stdio.h>
@@ -37,19 +38,17 @@
 
 #include "itype.h"
 #include "xmalloc.h"
+#include "elf.h"
+#include "dw.h"
 
 #ifndef nitems
 #define nitems(_a)	(sizeof((_a)) / sizeof((_a)[0]))
 #endif
 
-#define DEBUG_ABBREV	".debug_abbrev"
-#define DEBUG_INFO	".debug_info"
-#define DEBUG_STR	".debug_str"
-
-__dead void	 usage(void);
-int		 convert(const char *);
-int		 generate(const char *, const char *, int);
-int		 elf_convert(char *, size_t);
+__dead2 void	 usage(void);
+int		 convert(const char *, int);
+static int	 open_dir_of(const char *, const char **);
+static void	 sandbox(int, int);
 void		 elf_sort(void);
 char		*guess_static_local_name(char *);
 struct itype	*find_symb(struct itype *, size_t);
@@ -57,16 +56,17 @@ void		 dump_type(struct itype *);
 void		 dump_func(struct itype *, int *);
 void		 dump_obj(struct itype *, int *);
 
-/* elf.c */
-int		 iself(const char *, size_t);
-int		 elf_getshstab(const char *, size_t, const char **, size_t *);
-ssize_t		 elf_getsymtab(const char *, size_t, const char *, size_t,
-		     const Elf_Sym **, size_t *, const char **, size_t *);
-ssize_t		 elf_getsection(char *, size_t, const char *, const char *,
-		     size_t, const char **, size_t *);
+static struct elfobj		 eo;
+const char			*dstrbuf;
+size_t				 dstrlen;
+static const char		*strtab;
+static const struct elfsym	*symtab;
+static size_t			 strtabsz, nsymb;
 
-/* parse.c */
-void		 dwarf_parse(const char *, size_t, const char *, size_t);
+/* Target properties, set from the ELF header. */
+int		 target_bigendian;
+int		 target_reloc;
+unsigned int	 target_psz = sizeof(void *);
 
 const char	*ctf_enc2name(unsigned short);
 
@@ -75,20 +75,20 @@ struct itype_queue itypeq = TAILQ_HEAD_INITIALIZER(itypeq);
 struct itype_queue ifuncq = TAILQ_HEAD_INITIALIZER(ifuncq);
 struct itype_queue iobjq = TAILQ_HEAD_INITIALIZER(iobjq);
 
-__dead void
+__dead2 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-d] -l label -o outfile file\n",
-	    getprogname());
+	fprintf(stderr, "usage: %s [-l label] [-o outfile] file\n"
+	    "       %s -d file\n", getprogname(), getprogname());
 	exit(1);
 }
 
 int
 main(int argc, char *argv[])
 {
-	const char *filename, *label = NULL, *outfile = NULL;
+	const char *filename, *label = NULL, *outfile = NULL, *base = NULL;
 	int dump = 0;
-	int ch, error = 0;
+	int ch, error = 0, fd, dfd = -1;
 	struct itype *it;
 
 	setlocale(LC_ALL, "");
@@ -120,40 +120,55 @@ main(int argc, char *argv[])
 		usage();
 
 	/* Either dump the sections, or write it out. */
-	if ((dump && (outfile != NULL || label != NULL)) ||
-	    (!dump && (outfile == NULL || label == NULL)))
+	if (dump && (outfile != NULL || label != NULL))
 		usage();
 
 	filename = *argv;
 
-	if (unveil(filename, "r") == -1)
-		err(1, "unveil %s", filename);
-
-	if (outfile != NULL) {
-		if (unveil(outfile, "wc") == -1)
-			err(1, "unveil %s", outfile);
+	/*
+	 * Open everything the tool will touch, then enter capability mode
+	 * before a byte of the input is interpreted: the
+	 * input, and the directory that receives the output, where
+	 * in-place mode makes its temporary (3.1) and raw mode its file
+	 * (3.2).  Nothing from here on names a path.
+	 */
+	if ((fd = open(filename, O_RDONLY | O_CLOEXEC)) == -1) {
+		warn("open %s", filename);
+		return 1;
 	}
+	if (!dump) {
+		dfd = open_dir_of(outfile != NULL ? outfile : filename, &base);
+		if (dfd == -1)
+			return 1;
+	}
+	sandbox(fd, dfd);
 
-	if (pledge("stdio rpath wpath cpath", NULL) == -1)
-		err(1, "pledge");
-
-	error = convert(filename);
+	error = convert(filename, fd);
+	if (error == ELF_NODWARF)
+		return 0;	/* no DWARF: nothing to write */
 	if (error != 0)
-		return error;
+		return 1;
 
 	if (outfile != NULL) {
-		if (pledge("stdio wpath cpath", NULL) == -1)
-			err(1, "pledge");
+		/* Raw mode: the container alone. */
+		if (generate(dfd, base, outfile, label, 1) != 0)
+			return 1;
+	} else if (!dump) {
+		char	*ctfdata;
+		size_t	 ctflen;
 
-		error = generate(outfile, label, 1);
+		/* In-place mode: a .SUNW_ctf section in the input. */
+		if (generate_data(label, 1, &ctfdata, &ctflen) != 0)
+			return 1;
+		error = elfobj_write_ctf(&eo, dfd, base, ctfdata, ctflen);
+		free(ctfdata);
 		if (error != 0)
-			return error;
+			return 1;
 	}
+
+	elfobj_close(&eo);
 
 	if (dump) {
-		if (pledge("stdio", NULL) == -1)
-			err(1, "pledge");
-
 		int fidx = -1, oidx = -1;
 
 		TAILQ_FOREACH(it, &iobjq, it_symb)
@@ -177,84 +192,90 @@ main(int argc, char *argv[])
 	return 0;
 }
 
-int
-convert(const char *path)
+/*
+ * Open the directory holding ``path'' and return the name of the file
+ * within it; -1 (reported) if the directory cannot be opened.
+ */
+static int
+open_dir_of(const char *path, const char **basep)
 {
-	struct stat		 st;
-	int			 fd, error = 1;
-	char			*p;
+	char dir[PATH_MAX];
+	const char *slash;
+	int dfd;
 
-	fd = open(path, O_RDONLY);
-	if (fd == -1) {
-		warn("open %s", path);
-		return 1;
+	slash = strrchr(path, '/');
+	if (slash == NULL) {
+		strlcpy(dir, ".", sizeof(dir));
+		*basep = path;
+	} else {
+		/* ``/x'' lives in the root. */
+		snprintf(dir, sizeof(dir), "%.*s",
+		    (int)(slash == path ? 1 : slash - path), path);
+		*basep = slash + 1;
 	}
-	if (fstat(fd, &st) == -1) {
-		warn("fstat %s", path);
-		close(fd);
-		return 1;
-	}
-	if ((uintmax_t)st.st_size > SIZE_MAX) {
-		warnx("file too big to fit memory");
-		close(fd);
-		return 1;
-	}
-
-	p = mmap(NULL, st.st_size, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd, 0);
-	if (p == MAP_FAILED)
-		err(1, "mmap");
-
-	if (iself(p, st.st_size))
-		error = elf_convert(p, st.st_size);
-
-	munmap(p, st.st_size);
-	close(fd);
-
-	return error;
+	dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (dfd == -1)
+		warn("open %s", dir);
+	return dfd;
 }
 
-const char		*dstrbuf;
-size_t			 dstrlen;
-const char		*strtab;
-const Elf_Sym		*symtab;
-size_t			 strtabsz, nsymb;
-
-int
-elf_convert(char *p, size_t filesize)
+/*
+ * Enter capability mode with the descriptors limited to what the modes
+ * need: the input is read and mapped (libelf) and read again by the
+ * in-place writer; in the output directory a file is created, written,
+ * fchmod'ed and fsync'ed, renamed over the input, or unlinked on error.
+ * Without a directory (-d) only the input and stdio remain.
+ */
+static void
+sandbox(int fd, int dfd)
 {
-	const char		*shstab;
-	const char		*infobuf, *abbuf;
-	size_t			 infolen, ablen;
-	size_t			 shstabsz;
+	cap_rights_t rights;
 
-	/* Find section header string table location and size. */
-	if (elf_getshstab(p, filesize, &shstab, &shstabsz))
-		return 1;
-
-	/* Find symbol table and associated string table. */
-	if (elf_getsymtab(p, filesize, shstab, shstabsz, &symtab, &nsymb,
-	    &strtab, &strtabsz) == -1)
-		warnx("symbol table not found");
-
-	/* Find abbreviation location and size. */
-	if (elf_getsection(p, filesize, DEBUG_ABBREV, shstab, shstabsz, &abbuf,
-	    &ablen) == -1) {
-		warnx("%s section not found", DEBUG_ABBREV);
-		return 1;
+	cap_rights_init(&rights, CAP_READ, CAP_SEEK, CAP_FSTAT, CAP_MMAP_R);
+	if (caph_rights_limit(fd, &rights) == -1)
+		err(1, "cap_rights_limit");
+	if (dfd != -1) {
+		cap_rights_init(&rights, CAP_LOOKUP, CAP_CREATE, CAP_READ,
+		    CAP_WRITE, CAP_SEEK, CAP_FTRUNCATE, CAP_FCHMOD, CAP_FSTAT,
+		    CAP_FSYNC, CAP_RENAMEAT_SOURCE, CAP_RENAMEAT_TARGET,
+		    CAP_UNLINKAT);
+		if (caph_rights_limit(dfd, &rights) == -1)
+			err(1, "cap_rights_limit");
 	}
+	if (caph_limit_stdio() == -1)
+		err(1, "cap_rights_limit");
+	caph_cache_catpages();
+	if (caph_enter() == -1)
+		err(1, "cap_enter");
+}
 
-	if (elf_getsection(p, filesize, DEBUG_INFO, shstab, shstabsz, &infobuf,
-	    &infolen) == -1) {
-		warnx("%s section not found", DEBUG_INFO);
-		return 1;
-	}
+/*
+ * Returns 0 on success, ELF_NODWARF if there is nothing to convert, -1
+ * on error.  ``fd'' is the input, open for reading.
+ */
+int
+convert(const char *path, int fd)
+{
+	int error;
 
-	/* Find string table location and size. */
-	if (elf_getsection(p, filesize, DEBUG_STR, shstab, shstabsz, &dstrbuf,
-	    &dstrlen) == -1)
-		warnx("%s section not found", DEBUG_STR);
+	error = elfobj_open(&eo, path, fd);
+	if (error != 0)
+		return error;
 
-	dwarf_parse(infobuf, infolen, abbuf, ablen);
+	/* Target properties: the container follows the file's byte order. */
+	target_bigendian = eo.bigendian;
+	dw_bigendian = eo.bigendian;
+	target_psz = (eo.class == ELFCLASS64) ? 8 : 4;
+	target_reloc = (eo.type == ET_REL);
+
+	symtab = eo.syms;
+	nsymb = eo.nsyms;
+	strtab = eo.strtab;
+	strtabsz = eo.strtabsz;
+	dstrbuf = eo.str;
+	dstrlen = eo.strlen;
+
+	dwarf_parse(eo.info, eo.infolen, eo.abbrev, eo.abbrevlen);
 
 	/* Sort functions */
 	elf_sort();
@@ -340,7 +361,7 @@ elf_sort(void)
 
 	memset(&tmp, 0, sizeof(tmp));
 	for (i = 0; i < nsymb; i++) {
-		const Elf_Sym	*st = &symtab[i];
+		const struct elfsym *st = &symtab[i];
 
 		if (st->st_shndx == SHN_UNDEF || st->st_shndx == SHN_COMMON)
 			continue;
@@ -384,7 +405,7 @@ elf_sort(void)
 	}
 }
 
-const char *
+static const char *
 type_name(struct itype *it)
 {
 	const char *name;
@@ -517,7 +538,7 @@ dump_obj(struct itype *it, int *idx)
 	(*idx)++;
 
 	l = printf("  [%u] %u", (*idx), it->it_refp->it_idx);
-	printf("%*s %s (%llu)\n", 14 - l, "", it_name(it), it->it_ref);
+	printf("%*s %s (%" PRIu64 ")\n", 14 - l, "", it_name(it), it->it_ref);
 }
 
 const char *
